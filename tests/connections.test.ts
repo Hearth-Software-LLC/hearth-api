@@ -57,7 +57,7 @@ function dataClient(overrides: Partial<PlaidDataClient> = {}): PlaidDataClient {
   return {
     exchangePublicToken: vi.fn(async () => ({ access_token: 'access-sandbox-secret', item_id: 'item-1', request_id: 'r' })),
     getAccounts: vi.fn(async () => plaidAccounts),
-    getInstitution: vi.fn(async () => ({ institution: { name: 'Chase' } })),
+    getInstitution: vi.fn(async () => ({ institution: { name: 'Chase', url: 'https://www.chase.com' } })),
     syncTransactions: vi.fn(async () => ({
       added: [plaidTransaction(), plaidTransaction({ transaction_id: 'tx-pending', pending: true }),
         plaidTransaction({ transaction_id: 'tx-2', amount: -2500, merchant_name: null, name: 'PAYROLL', website: null, logo_url: null, location: { city: 'Provo', lat: null, lon: null } })],
@@ -121,7 +121,7 @@ describe('Connecting a bank', () => {
     expect(response.status).toBe(201);
     const body = await response.json();
     expect(body).toEqual({
-      itemId: 'item-1', institution: 'Chase',
+      itemId: 'item-1', institution: 'Chase', institutionDomain: 'chase.com',
       accounts: [
         { id: 'acct-1', name: 'Everyday Checking', mask: '0293', kind: 'checking', balanceCents: 123450 },
         { id: 'acct-2', name: 'Card', mask: '4410', kind: 'credit', balanceCents: 8710 },
@@ -141,7 +141,7 @@ describe('Connecting a bank', () => {
     const { app } = setup({ data });
     const response = await app.request('/v1/banking/connections', json({ publicToken: 'public-sandbox-1' }));
     expect(response.status).toBe(201);
-    expect(await response.json()).toMatchObject({ institution: 'Bank' });
+    expect(await response.json()).toMatchObject({ institution: 'Bank', institutionDomain: null });
   });
 
   it.each([{}, { publicToken: '' }, { publicToken: 'p', userId: 'attacker' }])('rejects invalid bodies: %j', async (body) => {

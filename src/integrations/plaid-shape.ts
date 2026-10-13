@@ -39,7 +39,7 @@ export const accountsSchema = z.object({
   accounts: z.array(accountSchema),
   item: z.object({ institution_id: z.string().nullish() }),
 });
-export const institutionSchema = z.object({ institution: z.object({ name: z.string() }) });
+export const institutionSchema = z.object({ institution: z.object({ name: z.string(), url: z.string().nullish() }) });
 export const syncSchema = z.object({
   added: z.array(transactionSchema),
   modified: z.array(transactionSchema),
@@ -75,7 +75,7 @@ export function toAccount(account: PlaidAccount) {
 }
 
 /** The merchant's domain from Plaid's website field, for Logo.dev ("www.target.com" → "target.com"). */
-function domain(website: string | null | undefined): string | null {
+export function domain(website: string | null | undefined): string | null {
   if (!website) return null;
   try {
     const host = new URL(website.includes('://') ? website : `https://${website}`).hostname.toLowerCase();

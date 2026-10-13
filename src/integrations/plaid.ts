@@ -73,7 +73,11 @@ export function createPlaidDataClient(config: Config): PlaidDataClient | undefin
     getAccounts: async (accessToken, signal) =>
       (await client.accountsGet({ access_token: accessToken }, { signal })).data,
     getInstitution: async (institutionId, countryCodes, signal) =>
-      (await client.institutionsGetById({ institution_id: institutionId, country_codes: countryCodes }, { signal })).data,
+      (await client.institutionsGetById({
+        institution_id: institutionId, country_codes: countryCodes,
+        // Adds the bank's website, for its logo.
+        options: { include_optional_metadata: true },
+      }, { signal })).data,
     syncTransactions: async (accessToken, cursor, signal) =>
       (await client.transactionsSync({ access_token: accessToken, ...(cursor ? { cursor } : {}), count: 100 }, { signal })).data,
     removeItem: async (accessToken, signal) =>

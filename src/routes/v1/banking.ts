@@ -9,7 +9,7 @@ import { ApiError } from '../../errors.js';
 import { createLinkToken, isPlaidCode, plaidFailure } from '../../integrations/plaid.js';
 import type { CreateLinkToken, PlaidDataClient } from '../../integrations/plaid.js';
 import {
-  accountsSchema, exchangeSchema, institutionSchema, parsePlaid, syncSchema, toAccount, toTransaction,
+  accountsSchema, domain, exchangeSchema, institutionSchema, parsePlaid, syncSchema, toAccount, toTransaction,
 } from '../../integrations/plaid-shape.js';
 import type { ConnectionStore } from '../../services/connections.js';
 import type { TokenSeal } from '../../services/token-seal.js';
@@ -142,7 +142,7 @@ export function registerBanking(
       201: {
         description: 'Connected',
         content: { 'application/json': { schema: z.object({
-          itemId: z.string(), institution: z.string(), accounts: z.array(accountSchema),
+          itemId: z.string(), institution: z.string(), institutionDomain: z.string().nullable(), accounts: z.array(accountSchema),
         }).openapi('NewBankConnection') } },
       },
       ...errors(400, 401, 403, 429, 502, 503, 504),
@@ -158,12 +158,15 @@ export function registerBanking(
       const exchange = parsePlaid(exchangeSchema, await dataClient.exchangePublicToken(publicToken, signal));
       const accounts = parsePlaid(accountsSchema, await dataClient.getAccounts(exchange.access_token, signal));
       let institution = 'Bank';
+      let institutionDomain: string | null = null;
       if (accounts.item.institution_id) {
         try {
-          institution = parsePlaid(institutionSchema,
-            await dataClient.getInstitution(accounts.item.institution_id, config.PLAID_COUNTRY_CODES, signal)).institution.name;
+          const found = parsePlaid(institutionSchema,
+            await dataClient.getInstitution(accounts.item.institution_id, config.PLAID_COUNTRY_CODES, signal)).institution;
+          institution = found.name;
+          institutionDomain = domain(found.url);
         } catch {
-          // The name is a nicety; the connection still works without it.
+          // The name and website are niceties; the connection still works without them.
         }
       }
       await store.save(userId, {
@@ -171,7 +174,7 @@ export function registerBanking(
         institution,
         sealedToken: seal.seal(exchange.access_token, userId, exchange.item_id),
       });
-      return context.json({ itemId: exchange.item_id, institution, accounts: accounts.accounts.map(toAccount) }, 201);
+      return context.json({ itemId: exchange.item_id, institution, institutionDomain, accounts: accounts.accounts.map(toAccount) }, 201);
     } catch (error) {
       throw plaidFailure(error, signal);
     }
