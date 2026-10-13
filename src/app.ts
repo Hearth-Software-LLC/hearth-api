@@ -20,6 +20,11 @@ import { createConnectionStore } from './services/connections.js';
 import type { ConnectionStore } from './services/connections.js';
 import { createTokenSeal } from './services/token-seal.js';
 import type { TokenSeal } from './services/token-seal.js';
+import { createCache } from './services/cache.js';
+import type { Cache } from './services/cache.js';
+import { createFatSecret } from './integrations/fatsecret.js';
+import { createRestaurantService } from './services/restaurants.js';
+import { registerRestaurants } from './routes/v1/restaurants.js';
 
 export type AppOptions = {
   config?: Config;
@@ -31,6 +36,7 @@ export type AppOptions = {
   plaidDataClient?: PlaidDataClient;
   connectionStore?: ConnectionStore;
   tokenSeal?: TokenSeal;
+  cache?: Cache;
 };
 
 type RequestLog = {
@@ -133,6 +139,9 @@ export function createApp(options: AppOptions = {}) {
   const reserveQuota = options.reserveQuota ?? createQuota(config);
   registerBrands(app, config, reserveQuota);
   registerFoods(app, config, reserveQuota, options.fetcher ?? fetch);
+  const cache = options.cache ?? createCache(config);
+  const fatSecret = createFatSecret(config, cache, options.fetcher ?? fetch);
+  registerRestaurants(app, fatSecret && createRestaurantService(fatSecret, cache, config.RESTAURANT_CACHE_HOURS), reserveQuota);
   registerBanking(app, config, reserveQuota, {
     linkClient: options.plaidLinkClient ?? createPlaidLinkClient(config),
     dataClient: options.plaidDataClient ?? createPlaidDataClient(config),

@@ -28,7 +28,10 @@ const transactionSchema = z.object({
   logo_url: z.string().nullish(),
   website: z.string().nullish(),
   personal_finance_category: z.object({ primary: z.string() }).nullish(),
-  location: z.object({ city: z.string().nullish(), lat: z.number().nullish(), lon: z.number().nullish() }).nullish(),
+  location: z.object({
+    address: z.string().nullish(), city: z.string().nullish(), region: z.string().nullish(),
+    postal_code: z.string().nullish(), lat: z.number().nullish(), lon: z.number().nullish(),
+  }).nullish(),
 });
 
 export const exchangeSchema = z.object({ access_token: z.string().min(1), item_id: z.string().min(1) });
@@ -82,6 +85,15 @@ function domain(website: string | null | undefined): string | null {
   }
 }
 
+/** "123 Main St, Lehi, UT 84043", only when Plaid has a street address (a city alone is too vague to pin). */
+function streetAddress(location: PlaidTransaction['location']): string | null {
+  const street = location?.address?.trim();
+  if (!street) return null;
+  const cityLine = [location?.city?.trim(), [location?.region?.trim(), location?.postal_code?.trim()].filter(Boolean).join(' ')]
+    .filter(Boolean).join(', ');
+  return [street, cityLine].filter(Boolean).join(', ');
+}
+
 export function toTransaction(transaction: PlaidTransaction) {
   return {
     id: transaction.transaction_id,
@@ -94,6 +106,7 @@ export function toTransaction(transaction: PlaidTransaction) {
     logoUrl: transaction.logo_url ?? null,
     merchantDomain: domain(transaction.website),
     city: transaction.location?.city ?? null,
+    address: streetAddress(transaction.location),
     latitude: transaction.location?.lat ?? null,
     longitude: transaction.location?.lon ?? null,
   };

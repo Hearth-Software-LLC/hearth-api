@@ -34,6 +34,13 @@ describe('shared quotas', () => {
     expect(limit).toHaveBeenCalledTimes(1);
   });
 
+  it('reserves a user and a global FatSecret quota for restaurants', async () => {
+    limit.mockResolvedValue(allowed);
+    await createQuota(config)('user-123', 'restaurants');
+    expect(limit.mock.calls[0]?.[0]).toMatch(/^restaurants:[a-f0-9]{64}$/);
+    expect(limit.mock.calls[1]?.[0]).toBe('fatsecret');
+  });
+
   it('reserves a user and global Plaid quota separate from foods', async () => {
     limit.mockResolvedValue(allowed);
     await createQuota(config)('user-123', 'plaid-link');

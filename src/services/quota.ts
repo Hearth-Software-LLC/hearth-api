@@ -4,7 +4,7 @@ import { Ratelimit } from '@upstash/ratelimit';
 import type { Config } from '../config.js';
 import { ApiError } from '../errors.js';
 
-export type ReserveQuota = (userId: string, operation: 'foods' | 'logos' | 'plaid-link' | 'banking') => Promise<void>;
+export type ReserveQuota = (userId: string, operation: 'foods' | 'logos' | 'restaurants' | 'plaid-link' | 'banking') => Promise<void>;
 
 export function createQuota(config: Config): ReserveQuota {
   if (!config.UPSTASH_REDIS_REST_URL || !config.UPSTASH_REDIS_REST_TOKEN) {
@@ -27,6 +27,16 @@ export function createQuota(config: Config): ReserveQuota {
   const foodLimit = new Ratelimit({
     redis,
     limiter: Ratelimit.fixedWindow(600, '1 h'),
+    prefix: `${config.RATE_LIMIT_PREFIX}:provider`,
+    analytics: false,
+    ephemeralCache: false,
+    timeout: 3000,
+  });
+  // Restaurant requests can each make a few FatSecret calls (a menu is up to four pages);
+  // most are answered from the cache. This caps what a burst can spend upstream.
+  const restaurantLimit = new Ratelimit({
+    redis,
+    limiter: Ratelimit.fixedWindow(1200, '1 h'),
     prefix: `${config.RATE_LIMIT_PREFIX}:provider`,
     analytics: false,
     ephemeralCache: false,
@@ -63,6 +73,13 @@ export function createQuota(config: Config): ReserveQuota {
         if (providerResult.reason === 'timeout') throw new Error('Quota timeout');
         if (!providerResult.success) {
           throw new ApiError(503, 'PROVIDER_QUOTA_EXCEEDED', 'Food provider quota is exhausted', retryAfter(providerResult.reset));
+        }
+      }
+      if (operation === 'restaurants') {
+        const providerResult = await restaurantLimit.limit('fatsecret');
+        if (providerResult.reason === 'timeout') throw new Error('Quota timeout');
+        if (!providerResult.success) {
+          throw new ApiError(503, 'PROVIDER_QUOTA_EXCEEDED', 'Restaurant data quota is exhausted', retryAfter(providerResult.reset));
         }
       }
       if (operation === 'plaid-link') {

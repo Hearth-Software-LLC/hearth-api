@@ -38,12 +38,20 @@ const configSchema = z.object({
   SUPABASE_URL: httpsUrl.optional(),
   SUPABASE_SECRET_KEY: z.string().trim().min(20).optional(),
   PLAID_TOKEN_KEY: tokenKey.optional(),
+  FATSECRET_CLIENT_ID: z.string().trim().min(1).optional(),
+  FATSECRET_CLIENT_SECRET: z.string().trim().min(1).optional(),
+  // Space-separated OAuth scopes. Restaurant menus use foods.search v5, which needs `premier`.
+  FATSECRET_SCOPE: z.string().trim().regex(/^[a-z-]+( [a-z-]+)*$/).default('premier'),
+  // How long restaurant menus may be kept in the shared cache. Check your FatSecret plan's
+  // terms for how long its data may be cached; 0 turns the cache off.
+  RESTAURANT_CACHE_HOURS: z.coerce.number().int().min(0).max(24).default(24),
 }).superRefine((config, context) => {
   for (const group of [
     ['AUTH_ISSUER', 'AUTH_AUDIENCE', 'AUTH_JWKS_URL'] as const,
     ['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN'] as const,
     ['PLAID_CLIENT_ID', 'PLAID_SECRET', 'PLAID_PRODUCTS'] as const,
     ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'PLAID_TOKEN_KEY'] as const,
+    ['FATSECRET_CLIENT_ID', 'FATSECRET_CLIENT_SECRET'] as const,
   ]) {
     const count = group.filter((name) => config[name] !== undefined).length;
     if (count > 0 && count < group.length) {

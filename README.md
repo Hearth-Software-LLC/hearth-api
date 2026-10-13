@@ -11,6 +11,8 @@ A small TypeScript/Hono backend shared by an iOS app suite. Runs locally on Node
 | `GET /v1/me` | Supabase JWT | Returns the verified user subject |
 | `GET /v1/brands/logo?domain=apple.com` | Anonymous or linked Supabase user + shared quota | Returns a direct Logo.dev image URL |
 | `GET /v1/foods/search?q=apple` | Anonymous or linked Supabase user + shared quota | Searches USDA FoodData Central summaries |
+| `GET /v1/restaurants/menu?name=Chipotle%20Mexican%20Grill` | Anonymous or linked Supabase user + shared quota | Matches a place name to a chain and returns its menu with nutrition per serving |
+| `POST /v1/restaurants/lookup` | Anonymous or linked Supabase user + shared quota | `{ "names": [...] }` (up to 12): which places are chains with published menus |
 | `POST /v1/banking/link-token` | Linked Supabase user + shared quota | Creates a Plaid Link token; with `itemId`, one for update mode |
 | `POST /v1/banking/connections` | Linked Supabase user + shared quota | Exchanges Link's public token, stores the sealed access token, returns the accounts |
 | `GET /v1/banking/connections` | Linked Supabase user + shared quota | Lists the caller's connected banks |
@@ -61,6 +63,10 @@ Uncomment and replace the relevant settings in `.env`. Never commit it or put se
 | `PLAID_ENV` | `sandbox` (default) or `production`; never use production credentials in previews |
 | `PLAID_CLIENT_NAME` | Display name in Link, 1-30 characters; default `Lifestyle` |
 | `PLAID_COUNTRY_CODES` | Comma-separated Plaid country codes; default `US` |
+| `FATSECRET_CLIENT_ID` | FatSecret Platform OAuth 2.0 client ID |
+| `FATSECRET_CLIENT_SECRET` | Server-only FatSecret client secret |
+| `FATSECRET_SCOPE` | OAuth scopes; default `premier` (needed by foods.search v5) |
+| `RESTAURANT_CACHE_HOURS` | How long menus stay in the shared cache, 0–24; default 24 |
 | `PORT` | Local server port; default 3000 |
 
 Configure all three identity settings together and both Redis settings together. With Supabase, use asymmetric JWT signing keys (ES256 or RS256); legacy HS256 secrets are deliberately unsupported. Match issuer and audience to the project's actual access-token configuration. Obtain access tokens through your identity provider's supported iOS flow.
@@ -89,9 +95,19 @@ Calls use a fixed upstream host, an eight-second deadline, a one-MiB response ca
 
 USDA data are public domain/CC0; attribution is included. Obtain your own key rather than relying on the low-quota demo key. Reference: [FoodData Central API guide](https://fdc.nal.usda.gov/api-guide).
 
+### FatSecret (restaurant menus)
+
+`GET /v1/restaurants/menu?name=` takes a place's name as Apple Maps shows it ("Chipotle Mexican Grill"), finds the matching chain in FatSecret's brand catalog ("Chipotle": every word of the brand in the place's name, in order, with at least one word that isn't generic like "grill" or "pizza"), and returns up to 200 of its items, each with its servings: calories always, protein, carbs, fat and fiber when FatSecret has them (`null` means unknown, not zero). Places without a chain answer `200` with `hasMenu: false`, so the app can offer estimates instead. `POST /v1/restaurants/lookup` answers the same question for up to 12 names at once, for the "Full menu" badges on a nearby list; one failed name comes back `hasMenu: null` instead of failing the batch.
+
+Reliability: the OAuth token (24 h) is shared through Redis and refreshed five minutes early, one request at a time; a rejected token is renewed once and the call retried. Each call has a six-second deadline, a 2 MiB cap and no redirects; network errors, timeouts and 5xx are retried once with jitter. FatSecret's in-body error codes are mapped (`13` renew, `12/14/21` → `503 PROVIDER_NOT_CONFIGURED`, `22` → `503 PROVIDER_QUOTA_EXCEEDED`). Brand matches are cached for a week (misses for a day), menus for `RESTAURANT_CACHE_HOURS`; a menu older than six hours is refreshed, and if FatSecret fails then the cached copy is served with `stale: true`. The cache is best effort: Redis trouble only means asking FatSecret again. Malformed foods are dropped individually.
+
+**IP addresses.** FatSecret only accepts requests from IP addresses registered under your keys (Premier plans accept CIDR ranges). Vercel Functions don't have fixed outbound addresses unless you add Vercel's Static IPs, so either register Vercel's static egress IPs or a range FatSecret accepts for your plan. Until the IP is accepted, the routes answer `503 PROVIDER_NOT_CONFIGURED`.
+
+**Terms.** Check FatSecret's terms for your plan on caching (their docs list only food and serving IDs as storable) and on attribution: responses carry `attribution: "Powered by fatsecret"` for the app to show.
+
 ### Quotas
 
-Shared Redis counters reserve quota before provider access: 30 food/logo requests per user per operation per fixed minute window, plus 600 food searches per fixed hour window across the deployment. Plaid Link-token creation has separate limits of five requests per user per fixed minute and 100 per fixed hour globally per Plaid environment. These are conservative starter settings in `src/services/quota.ts`, not a provider billing guarantee. Fixed windows allow boundary bursts. Size limits to your actual provider plan and account for other consumers of the same key.
+Shared Redis counters reserve quota before provider access: 30 food/logo requests per user per operation per fixed minute window, plus 600 food searches per fixed hour window across the deployment. Restaurant requests share the per-user limit and have their own 1,200-per-hour FatSecret budget. Plaid Link-token creation has separate limits of five requests per user per fixed minute and 100 per fixed hour globally per Plaid environment. These are conservative starter settings in `src/services/quota.ts`, not a provider billing guarantee. Fixed windows allow boundary bursts. Size limits to your actual provider plan and account for other consumers of the same key.
 
 Redis failures and the rate-limit library's fail-open timeout result are converted to `503`; no upstream request is made. Failed provider calls still consume reserved quota. User identifiers are hashed in Redis keys. Production and previews must use isolated provider credentials and Redis resources, with a common namespace across instances that share a budget.
 
