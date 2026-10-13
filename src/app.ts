@@ -14,8 +14,12 @@ import { registerFoods } from './routes/v1/foods.js';
 import { createQuota } from './services/quota.js';
 import type { ReserveQuota } from './services/quota.js';
 import { registerBanking } from './routes/v1/banking.js';
-import { createPlaidLinkClient } from './integrations/plaid.js';
-import type { CreateLinkToken } from './integrations/plaid.js';
+import { createPlaidDataClient, createPlaidLinkClient } from './integrations/plaid.js';
+import type { CreateLinkToken, PlaidDataClient } from './integrations/plaid.js';
+import { createConnectionStore } from './services/connections.js';
+import type { ConnectionStore } from './services/connections.js';
+import { createTokenSeal } from './services/token-seal.js';
+import type { TokenSeal } from './services/token-seal.js';
 
 export type AppOptions = {
   config?: Config;
@@ -24,6 +28,9 @@ export type AppOptions = {
   fetcher?: typeof fetch;
   logger?: (record: RequestLog) => void;
   plaidLinkClient?: CreateLinkToken;
+  plaidDataClient?: PlaidDataClient;
+  connectionStore?: ConnectionStore;
+  tokenSeal?: TokenSeal;
 };
 
 type RequestLog = {
@@ -126,7 +133,12 @@ export function createApp(options: AppOptions = {}) {
   const reserveQuota = options.reserveQuota ?? createQuota(config);
   registerBrands(app, config, reserveQuota);
   registerFoods(app, config, reserveQuota, options.fetcher ?? fetch);
-  registerBanking(app, config, reserveQuota, options.plaidLinkClient ?? createPlaidLinkClient(config));
+  registerBanking(app, config, reserveQuota, {
+    linkClient: options.plaidLinkClient ?? createPlaidLinkClient(config),
+    dataClient: options.plaidDataClient ?? createPlaidDataClient(config),
+    store: options.connectionStore ?? createConnectionStore(config, options.fetcher ?? fetch),
+    seal: options.tokenSeal ?? (config.PLAID_TOKEN_KEY ? createTokenSeal(config.PLAID_TOKEN_KEY) : undefined),
+  });
 
   app.doc('/openapi.json', {
     openapi: '3.0.0',

@@ -5,7 +5,8 @@ import type { Config } from '../config.js';
 import type { ApiEnvironment } from '../contracts/common.js';
 import { ApiError } from '../errors.js';
 
-export type VerifyToken = (token: string) => Promise<string>;
+export type VerifiedIdentity = { userId: string; isAnonymous: boolean };
+export type VerifyToken = (token: string) => Promise<string | VerifiedIdentity>;
 
 export function createTokenVerifier(config: Config, resolver?: JWTVerifyGetKey): VerifyToken {
   if (!config.AUTH_ISSUER || !config.AUTH_AUDIENCE || !config.AUTH_JWKS_URL) {
@@ -28,7 +29,7 @@ export function createTokenVerifier(config: Config, resolver?: JWTVerifyGetKey):
       if (typeof payload.sub !== 'string' || !payload.sub.trim()) {
         throw new ApiError(401, 'UNAUTHORIZED', 'A valid bearer token is required');
       }
-      return payload.sub;
+      return { userId: payload.sub, isAnonymous: payload.is_anonymous === true };
     } catch (error) {
       if (error instanceof ApiError) throw error;
       if (error instanceof errors.JOSEError && !(error instanceof errors.JWKSTimeout)) {
@@ -47,7 +48,9 @@ export function authMiddleware(verifyToken: VerifyToken) {
     if (!token || token.length > 8192) {
       throw new ApiError(401, 'UNAUTHORIZED', 'A valid bearer token is required');
     }
-    context.set('userId', await verifyToken(token));
+    const identity = await verifyToken(token);
+    context.set('userId', typeof identity === 'string' ? identity : identity.userId);
+    context.set('isAnonymous', typeof identity === 'string' ? false : identity.isAnonymous);
     await next();
   });
 }

@@ -48,6 +48,23 @@ describe('Plaid Link-token creation', () => {
     expect(JSON.stringify(logs)).not.toMatch(/link-sandbox-test|test-plaid-secret|test-token|verified-user-123/);
   });
 
+
+  it('rejects anonymous users before quota and provider access', async () => {
+    const plaidLinkClient = vi.fn<CreateLinkToken>();
+    const reserveQuota = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      config,
+      verifyToken: async () => ({ userId: 'anonymous-user', isAnonymous: true }),
+      reserveQuota,
+      plaidLinkClient,
+    });
+    const response = await app.request(path, request);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ error: { code: 'REGISTERED_IDENTITY_REQUIRED' } });
+    expect(plaidLinkClient).not.toHaveBeenCalled();
+    expect(reserveQuota).not.toHaveBeenCalled();
+  });
+
   it('rejects unauthenticated calls before quota and provider access', async () => {
     const { app, plaidLinkClient, reserveQuota } = setup();
     expect((await app.request(path, { ...request, headers: { 'Content-Type': 'application/json' } })).status).toBe(401);
@@ -193,7 +210,7 @@ describe('official Plaid SDK adapter', () => {
         basePath: `https://${environmentName}.plaid.com`,
         baseOptions: {
           headers: { 'PLAID-CLIENT-ID': 'test-client-id', 'PLAID-SECRET': 'test-plaid-secret', 'Plaid-Version': '2020-09-14' },
-          timeout: 8000, maxRedirects: 0, maxContentLength: 65_536, maxBodyLength: 16_384,
+          timeout: 8000, maxRedirects: 0, maxContentLength: 2_097_152, maxBodyLength: 16_384,
         },
       },
     });

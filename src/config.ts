@@ -13,6 +13,12 @@ const countries = z.string().transform((value) => value.split(',').map((entry) =
   .pipe(z.array(z.enum(CountryCode)).min(1).max(20)
     .refine((values) => new Set(values).size === values.length));
 
+// A 32-byte AES-256 key, base64. Kept apart from the database so a database leak alone can't
+// open the Plaid access tokens stored in it.
+const tokenKey = z.string().trim().refine((value) => {
+  try { return Buffer.from(value, 'base64').length === 32; } catch { return false; }
+});
+
 const configSchema = z.object({
   AUTH_ISSUER: httpsUrl.optional(),
   AUTH_AUDIENCE: z.string().min(1).optional(),
@@ -29,11 +35,15 @@ const configSchema = z.object({
   PLAID_PRODUCTS: products.optional(),
   PLAID_COUNTRY_CODES: countries.prefault('US'),
   PLAID_REDIRECT_URI: redirectUrl.optional(),
+  SUPABASE_URL: httpsUrl.optional(),
+  SUPABASE_SECRET_KEY: z.string().trim().min(20).optional(),
+  PLAID_TOKEN_KEY: tokenKey.optional(),
 }).superRefine((config, context) => {
   for (const group of [
     ['AUTH_ISSUER', 'AUTH_AUDIENCE', 'AUTH_JWKS_URL'] as const,
     ['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN'] as const,
-    ['PLAID_CLIENT_ID', 'PLAID_SECRET', 'PLAID_PRODUCTS', 'PLAID_REDIRECT_URI'] as const,
+    ['PLAID_CLIENT_ID', 'PLAID_SECRET', 'PLAID_PRODUCTS'] as const,
+    ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'PLAID_TOKEN_KEY'] as const,
   ]) {
     const count = group.filter((name) => config[name] !== undefined).length;
     if (count > 0 && count < group.length) {

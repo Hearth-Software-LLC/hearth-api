@@ -8,10 +8,14 @@ A small TypeScript/Hono backend shared by an iOS app suite. Runs locally on Node
 | --- | --- | --- |
 | `GET /health` | Public | Liveness only; does not probe providers |
 | `GET /openapi.json` | Public | Generated API contract, including bearer authentication |
-| `GET /v1/me` | JWT | Returns the verified user subject |
-| `GET /v1/brands/logo?domain=apple.com` | JWT + shared quota | Returns a direct Logo.dev image URL |
-| `GET /v1/foods/search?q=apple` | JWT + shared quota | Searches USDA FoodData Central summaries |
-| `POST /v1/banking/link-token` | JWT + shared quota | Creates a Plaid Link token for the verified user |
+| `GET /v1/me` | Supabase JWT | Returns the verified user subject |
+| `GET /v1/brands/logo?domain=apple.com` | Anonymous or linked Supabase user + shared quota | Returns a direct Logo.dev image URL |
+| `GET /v1/foods/search?q=apple` | Anonymous or linked Supabase user + shared quota | Searches USDA FoodData Central summaries |
+| `POST /v1/banking/link-token` | Linked Supabase user + shared quota | Creates a Plaid Link token; with `itemId`, one for update mode |
+| `POST /v1/banking/connections` | Linked Supabase user + shared quota | Exchanges Link's public token, stores the sealed access token, returns the accounts |
+| `GET /v1/banking/connections` | Linked Supabase user + shared quota | Lists the caller's connected banks |
+| `POST /v1/banking/connections/{itemId}/sync` | Linked Supabase user + shared quota | Transactions added, changed and removed since the app's cursor, plus balances |
+| `DELETE /v1/banking/connections/{itemId}` | Linked Supabase user + shared quota | Removes the item at Plaid and deletes its stored token |
 
 All responses use `Cache-Control: no-store` and include `X-Request-ID`. Errors have the documented `{ "error": { "code", "message", "requestId" } }` structure. Logs include the matched route, status, duration, and request ID, not tokens, query strings, or provider error details.
 
@@ -61,7 +65,7 @@ Uncomment and replace the relevant settings in `.env`. Never commit it or put se
 
 Configure all three identity settings together and both Redis settings together. With Supabase, use asymmetric JWT signing keys (ES256 or RS256); legacy HS256 secrets are deliberately unsupported. Match issuer and audience to the project's actual access-token configuration. Obtain access tokens through your identity provider's supported iOS flow.
 
-The token verifier checks signature, issuer, audience, expiry, issued-at, and a nonempty subject. Client-supplied app IDs do not grant permissions. These initial reference-data routes are available to all authenticated users; app-specific permissions must be added before private banking routes.
+The token verifier checks signature, issuer, audience, expiry, issued-at, and a nonempty subject. Client-supplied app IDs do not grant permissions. Reference-data routes accept both anonymous and linked Supabase users. Banking rejects tokens whose verified `is_anonymous` claim is true; signing in with Apple through Supabase creates the durable identity required for financial connections.
 
 Tests use generated signing keys, provider fixtures, and mocked quota-library responses. They do not need real credentials or make billable provider calls.
 
@@ -91,36 +95,25 @@ Shared Redis counters reserve quota before provider access: 30 food/logo request
 
 Redis failures and the rate-limit library's fail-open timeout result are converted to `503`; no upstream request is made. Failed provider calls still consume reserved quota. User identifiers are hashed in Redis keys. Production and previews must use isolated provider credentials and Redis resources, with a common namespace across instances that share a budget.
 
-### Plaid Link
+### Plaid
 
-Configure `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_PRODUCTS`, and `PLAID_REDIRECT_URI` together, as well as the existing identity and Redis settings. Products are deliberately not defaulted: request only capabilities the app actually needs and your Plaid account supports. This initial adapter supports standard bank-linking products, not payment, identity-verification, CRA, or other flows needing additional parameters.
+Configure `PLAID_CLIENT_ID`, `PLAID_SECRET` and `PLAID_PRODUCTS` together, plus the identity and Redis settings. Products are deliberately not defaulted. `PLAID_REDIRECT_URI` is optional: only OAuth banks need it, and then it must be a dashboard-registered HTTPS universal link served by the app's Associated Domains (`apple-app-site-association`).
 
-Register the redirect URI in the Plaid dashboard and configure its domain's Associated Domains/`apple-app-site-association` file for the iOS app. The URI must match exactly. For a multi-app suite, this initial route uses one server-configured name, product list, and redirect; add server-authorized per-app configuration before apps need different OAuth destinations or permissions.
+Connections also need storage: `SUPABASE_URL`, `SUPABASE_SECRET_KEY` (a server-only secret key) and `PLAID_TOKEN_KEY` (32 bytes, base64; `openssl rand -base64 32`), together. Apply `supabase/migrations/*_plaid_connections.sql` (`supabase db push`). Without them the connection routes answer `503 STORAGE_NOT_CONFIGURED`.
 
-Send an empty JSON object and a valid access token from your identity provider:
+**What's stored, and what isn't.** The API keeps one row per Plaid item: the owner (the verified JWT subject), the item ID, the institution's name and the access token, sealed with AES-256-GCM using `PLAID_TOKEN_KEY` and bound to its owner and item. The table has row-level security on, no policies and no grants for `anon`/`authenticated`, so app-facing keys can't read it. Transactions, balances and sync cursors are never stored server-side: the app keeps its cursor and the data, and asks for changes when it wants them. There are deliberately no webhooks or job queues; sync is app-driven.
 
-```sh
-curl -X POST http://127.0.0.1:3000/v1/banking/link-token \
-	-H "Authorization: Bearer $ACCESS_TOKEN" \
-	-H 'Content-Type: application/json' \
-	-d '{}'
-```
+**Flow** (all bodies JSON, all calls with a non-anonymous Supabase access token):
 
-```json
-{
-	"linkToken": "link-sandbox-...",
-	"expiresAt": "2026-10-12T16:00:00Z",
-	"plaidRequestId": "..."
-}
-```
+1. `POST /v1/banking/link-token` with `{}` → `{ linkToken, expiresAt, plaidRequestId }`. Open Plaid Link (iOS SDK) with it.
+2. `POST /v1/banking/connections` with `{ "publicToken": "public-…" }` → `201 { itemId, institution, accounts }`.
+3. `POST /v1/banking/connections/{itemId}/sync` with `{ "cursor": "…" }` (omit it the first time) → `{ added, modified, removed, accounts, nextCursor, hasMore }`. Save `nextCursor`; call again while `hasMore`. Pending transactions are left out until they post. Amounts are positive cents with `isIncome`; `logoUrl` is Plaid's merchant logo and `merchantDomain` its website's domain (for Logo.dev).
+4. `409 CONNECTION_NEEDS_REAUTH` means the bank wants the person to sign in again: `POST /v1/banking/link-token` with `{ "itemId": "…" }`, open Link in update mode, then sync.
+5. `DELETE /v1/banking/connections/{itemId}` disconnects.
 
-The server uses the verified JWT subject as `client_user_id`; configure identity subjects as opaque IDs, not email addresses or phone numbers. Client-provided user IDs, products, redirects, credentials, and access tokens are rejected. Request bodies are limited to one KiB. The official Plaid SDK uses a fixed environment host, an eight-second deadline, a 64-KiB response limit, no redirects, and no automatic retries. Logs and errors do not expose credentials or Link tokens. Use the returned token to initialize the official Plaid Link iOS SDK; obtain a fresh token for each Link session and treat it as sensitive.
+Only the person who connected an item can use it; other users get `404 CONNECTION_NOT_FOUND`. Client-provided user IDs, products, redirects and access tokens are rejected. Plaid calls use the official SDK with fixed hosts, eight-second deadlines per call, a 2 MiB response limit, no redirects and no automatic retries. Logs and errors never include credentials, Link tokens or access tokens. Errors: `429` user quota, `503` provider quota/configuration or storage, `502` upstream, `504` timeouts, `409` reauth, `404` unknown connection.
 
-Plaid failures use the existing JSON error contract: user quota failures are `429`, provider quota/configuration failures are `503`, upstream failures are `502`, and timeouts are `504`. `plaidRequestId` is the provider's success request ID; `X-Request-ID` identifies the API request.
-
-**This starts Link only, not a complete bank connection.** Public-token exchange, encrypted access-token persistence, webhooks, update mode, transactions, and disconnect are not implemented. Use sandbox for development and do not roll out production Link before those lifecycle operations and consent controls exist. Production Link can initialize billable products even before your app reads their data.
-
-References: [Plaid Link-token API](https://plaid.com/docs/api/link/#linktokencreate) and [iOS Link setup](https://plaid.com/docs/link/ios/).
+References: [Link tokens](https://plaid.com/docs/api/link/#linktokencreate), [token exchange](https://plaid.com/docs/api/items/#itempublic_tokenexchange), [transactions sync](https://plaid.com/docs/api/products/transactions/#transactionssync), [update mode](https://plaid.com/docs/link/update-mode/), [iOS Link](https://plaid.com/docs/link/ios/).
 
 ## Vercel Deployment
 
@@ -134,6 +127,6 @@ Reference: [Hono on Vercel](https://vercel.com/docs/frameworks/backend/hono).
 
 ## Next Milestone
 
-Plaid Link-token creation is implemented; the stateful connection lifecycle and database are not. Before accepting Plaid public tokens, add managed PostgreSQL, connection ownership, encrypted access-token storage with separate key management, a durable queue, verified webhooks, product-specific synchronization, reconnect, disconnect, and deletion behavior. Choose consent boundaries first; do not add an exchange endpoint that cannot safely store its result.
+The Plaid connection lifecycle is implemented without webhooks or server-side transaction storage, by design (app-driven sync). Revisit webhooks only if background freshness matters more than keeping the server stateless.
 
 Other follow-ups are a shared reference-data cache with bounded freshness, food details and normalized nutrients, CI deployment gates, provider live smoke tests, and a shared Swift client. The architecture document contains the broader plan.

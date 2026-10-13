@@ -13,8 +13,8 @@ let keys: Awaited<ReturnType<typeof generateKeyPair>>;
 
 beforeAll(async () => { keys = await generateKeyPair('ES256'); });
 
-async function token(overrides: { issuer?: string; audience?: string; expiration?: string; subject?: string } = {}) {
-  return new SignJWT({})
+async function token(overrides: { issuer?: string; audience?: string; expiration?: string; subject?: string; isAnonymous?: boolean } = {}) {
+  return new SignJWT({ is_anonymous: overrides.isAnonymous ?? false })
     .setProtectedHeader({ alg: 'ES256' })
     .setSubject(overrides.subject ?? 'user-123')
     .setIssuer(overrides.issuer ?? config.AUTH_ISSUER!)
@@ -36,6 +36,15 @@ describe('JWT authentication', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ id: 'user-123' });
     expect(response.headers.get('Cache-Control')).toBe('no-store');
+  });
+
+
+  it('retains the anonymous identity claim for route authorization', async () => {
+    const verify = createTokenVerifier(config, async () => keys.publicKey);
+    await expect(verify(await token({ isAnonymous: true }))).resolves.toEqual({
+      userId: 'user-123',
+      isAnonymous: true,
+    });
   });
 
   it.each([

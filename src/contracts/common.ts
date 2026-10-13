@@ -12,5 +12,6 @@ export type ApiEnvironment = {
   Variables: {
     requestId: string;
     userId: string;
+    isAnonymous: boolean;
   };
 };

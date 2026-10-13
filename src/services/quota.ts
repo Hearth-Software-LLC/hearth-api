@@ -4,7 +4,7 @@ import { Ratelimit } from '@upstash/ratelimit';
 import type { Config } from '../config.js';
 import { ApiError } from '../errors.js';
 
-export type ReserveQuota = (userId: string, operation: 'foods' | 'logos' | 'plaid-link') => Promise<void>;
+export type ReserveQuota = (userId: string, operation: 'foods' | 'logos' | 'plaid-link' | 'banking') => Promise<void>;
 
 export function createQuota(config: Config): ReserveQuota {
   if (!config.UPSTASH_REDIS_REST_URL || !config.UPSTASH_REDIS_REST_TOKEN) {
