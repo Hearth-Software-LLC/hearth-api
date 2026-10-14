@@ -10,6 +10,7 @@ A small TypeScript/Hono backend shared by an iOS app suite. Runs locally on Node
 | `GET /openapi.json` | Public | Generated API contract, including bearer authentication |
 | `GET /v1/me` | Supabase JWT | Returns the verified user subject |
 | `GET /v1/brands/logo?domain=apple.com` | Anonymous or linked Supabase user + shared quota | Returns a direct Logo.dev image URL |
+| `POST /v1/brands/logos` | Anonymous or linked Supabase user + shared quota | Up to 24 Logo.dev image URLs at once, by domain or known brand name |
 | `GET /v1/foods/search?q=apple` | Anonymous or linked Supabase user + shared quota | Searches USDA FoodData Central summaries |
 | `GET /v1/restaurants/menu?name=Chipotle%20Mexican%20Grill` | Anonymous or linked Supabase user + shared quota | Matches a place name to a chain and returns its menu with nutrition per serving |
 | `POST /v1/restaurants/lookup` | Anonymous or linked Supabase user + shared quota | `{ "names": [...] }` (up to 12): which places are chains with published menus |
@@ -83,7 +84,9 @@ The route validates a DNS domain (not a URL or IP), accepts `size` from 16 to 51
 
 The returned publishable key can be reused to request images directly. API quotas therefore limit URL resolution, **not CDN downloads**; configure provider controls and monitor CDN usage separately. Verify native-client compatibility with any key domain restrictions, and satisfy your plan's attribution and fair-use requirements before launch. Never substitute a secret `sk_` key.
 
-Reference: [Logo.dev image documentation](https://www.logo.dev/docs/logo-images/introduction).
+`POST /v1/brands/logos` takes `{ items: [{ id, domain?, name? }], size?, format? }` (1–24 items, each with a domain or a name) and returns `{ items: [{ id, url, source }], provider, attribution }` in order, for one quota reservation. A domain wins when both are given. Name lookups (`img.logo.dev/name/…`) pick Logo.dev's closest-named brand, so send names only for known brands (Sated sends a restaurant's matched chain name, never a raw place name).
+
+Reference: [Logo.dev image documentation](https://www.logo.dev/docs/logo-images/introduction). Name lookups: [Logo by brand name](https://www.logo.dev/docs/logo-images/name).
 
 ### USDA FoodData Central
 

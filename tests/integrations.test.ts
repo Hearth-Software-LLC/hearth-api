@@ -48,6 +48,69 @@ describe('Logo.dev URL resolution', () => {
   });
 });
 
+describe('Logo.dev batch URL resolution', () => {
+  const post = (app: ReturnType<typeof setup>['app'], body: unknown) => app.request('/v1/brands/logos', {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  it('prefers the domain, falls back to an encoded brand name, and keeps order with one quota reservation', async () => {
+    const { app, fetcher, reserveQuota } = setup();
+    const response = await post(app, { items: [
+      { id: 'a', domain: 'Chipotle.com', name: 'Chipotle' },
+      { id: 'b', name: "Raising Cane's & Co" },
+    ], size: 96 });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.provider).toBe('logo.dev');
+    expect(body.attribution).toBe('Logos provided by Logo.dev');
+    expect(body.items.map((item: { id: string; source: string }) => [item.id, item.source])).toEqual([['a', 'domain'], ['b', 'name']]);
+    const byDomain = new URL(body.items[0].url);
+    expect(byDomain.origin).toBe('https://img.logo.dev');
+    expect(byDomain.pathname).toBe('/chipotle.com');
+    expect(Object.fromEntries(byDomain.searchParams)).toEqual({ token: 'pk_test', size: '96', format: 'png', fallback: '404' });
+    const byName = new URL(body.items[1].url);
+    expect(byName.origin).toBe('https://img.logo.dev');
+    expect(decodeURIComponent(byName.pathname)).toBe("/name/Raising Cane's & Co");
+    expect(byName.searchParams.get('fallback')).toBe('404');
+    expect(reserveQuota).toHaveBeenCalledTimes(1);
+    expect(reserveQuota).toHaveBeenCalledWith('user-123', 'logos');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('keeps a name from escaping the path or host', async () => {
+    const { app } = setup();
+    const body = await (await post(app, { items: [{ id: 'x', name: '../../evil.com/?token=steal#' }] })).json();
+    const url = new URL(body.items[0].url);
+    expect(url.origin).toBe('https://img.logo.dev');
+    expect(url.pathname.startsWith('/name/')).toBe(true);
+    expect(url.pathname.split('/')).toHaveLength(3);
+    expect(url.searchParams.get('token')).toBe('pk_test');
+  });
+
+  it.each([
+    ['no items', { items: [] }],
+    ['too many items', { items: Array.from({ length: 25 }, (_, index) => ({ id: String(index), name: 'A' })) }],
+    ['neither domain nor name', { items: [{ id: 'a' }] }],
+    ['an unsafe domain', { items: [{ id: 'a', domain: 'https://apple.com' }] }],
+    ['a control character', { items: [{ id: 'a', name: 'Bad\nName' }] }],
+    ['an oversized logo', { items: [{ id: 'a', name: 'A' }], size: 1024 }],
+  ])('rejects %s', async (_, body) => {
+    const { app, reserveQuota } = setup();
+    expect((await post(app, body)).status).toBe(400);
+    expect(reserveQuota).not.toHaveBeenCalled();
+  });
+
+  it('reports a missing key as not configured', async () => {
+    const config = readConfig({});
+    const app = createApp({ config, verifyToken: vi.fn().mockResolvedValue('user-123'), reserveQuota: vi.fn().mockResolvedValue(undefined) });
+    const response = await app.request('/v1/brands/logos', {
+      method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify({ items: [{ id: 'a', name: 'A' }] }),
+    });
+    expect(response.status).toBe(503);
+    expect((await response.json()).error.code).toBe('PROVIDER_NOT_CONFIGURED');
+  });
+});
+
 describe('USDA food search', () => {
   it('maps validated summaries and keeps credentials server-side', async () => {
     const { app, fetcher, reserveQuota } = setup();
