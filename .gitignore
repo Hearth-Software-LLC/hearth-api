@@ -8,3 +8,5 @@ vercel.env
 .vercel/
 supabase/.temp/
 *.tsbuildinfo
+.vercel
+.env*
