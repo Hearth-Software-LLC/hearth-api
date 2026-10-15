@@ -71,10 +71,23 @@ function summaryFor(route: BigTableRoute): string {
   return `${route.method} ${route.path.replace('/v1/bigtable/', '')}`;
 }
 
+// Next.js prefers static path segments over dynamic ones (/recipes/favorites over
+// /recipes/[id]); Hono picks the first matching route. Register static segments first.
+function specificityOrder(a: BigTableRoute, b: BigTableRoute): number {
+  const left = a.path.split('/');
+  const right = b.path.split('/');
+  for (let index = 0; index < Math.min(left.length, right.length); index += 1) {
+    const leftDynamic = left[index]!.startsWith('{');
+    const rightDynamic = right[index]!.startsWith('{');
+    if (leftDynamic !== rightDynamic) return leftDynamic ? 1 : -1;
+  }
+  return 0;
+}
+
 export function registerBigTable(app: OpenAPIHono<ApiEnvironment>, verifyToken: VerifyToken) {
   setBigTableTokenVerifier(verifyToken);
 
-  for (const route of bigTableRoutes) {
+  for (const route of [...bigTableRoutes].sort(specificityOrder)) {
     const handle = async (context: Context<ApiEnvironment>) => {
       const params = context.req.param() as BigTableParams;
       const requestId = context.get('requestId');

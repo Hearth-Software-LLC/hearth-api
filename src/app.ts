@@ -120,12 +120,13 @@ export function createApp(options: AppOptions = {}) {
     type: 'http', scheme: 'bearer', bearerFormat: 'JWT',
   });
   const verifyToken = options.verifyToken ?? createTokenVerifier(config);
-  // Shared suite routes require a bearer token up front. BigTable routes (/v1/bigtable/*)
-  // authenticate inside their handlers, because a few of them are public.
+  // Every /v1 route requires a bearer token up front, except BigTable's (/v1/bigtable/*),
+  // which authenticate inside their handlers because a few of them are public.
   const requireAuth = authMiddleware(verifyToken);
-  for (const path of ['/v1/me', '/v1/brands/*', '/v1/foods/*', '/v1/restaurants/*', '/v1/banking/*']) {
-    app.use(path, requireAuth);
-  }
+  app.use('/v1/*', async (context, next) => {
+    if (context.req.path.startsWith('/v1/bigtable/')) return next();
+    return requireAuth(context, next);
+  });
 
   app.openapi(createRoute({
     method: 'get',

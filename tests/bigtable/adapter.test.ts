@@ -98,6 +98,34 @@ describe('BigTable routes on the Hearth API', () => {
     vi.unstubAllEnvs();
   });
 
+  it('routes static segments ahead of path parameters, as Next.js did', async () => {
+    const tables: string[] = [];
+    fromMock.mockImplementation((table: string) => {
+      tables.push(table);
+      throw new Error('stop after routing');
+    });
+    await app().request('/v1/bigtable/recipes/favorites', { headers: { Authorization: 'Bearer member-token' } });
+    await app().request('/v1/bigtable/recipes/tags', { headers: { Authorization: 'Bearer member-token' } });
+    expect(tables[0]).toBe('saved_recipes');
+    expect(tables[1]).toBe('custom_recipe_tags');
+  });
+
+  it('reports an authentication outage as 503, not as signed out', async () => {
+    const { ApiError } = await import('../../src/errors.js');
+    const outage = createApp({
+      verifyToken: async () => { throw new ApiError(503, 'AUTH_UNAVAILABLE', 'Authentication is temporarily unavailable'); },
+      logger: () => {},
+    });
+    const response = await outage.request('/v1/bigtable/usage/check', { headers: { Authorization: 'Bearer member-token' } });
+    expect(response.status).toBe(503);
+    expect((await response.json() as { error: { code: string } }).error.code).toBe('AUTH_UNAVAILABLE');
+  });
+
+  it('protects any other /v1 route by default', async () => {
+    const response = await app().request('/v1/something-new');
+    expect(response.status).toBe(401);
+  });
+
   it('lists BigTable routes in the OpenAPI contract', async () => {
     const response = await app().request('/openapi.json');
     const contract = await response.json() as { info: { title: string }; paths: Record<string, Record<string, unknown>> };

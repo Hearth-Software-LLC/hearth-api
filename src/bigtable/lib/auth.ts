@@ -1,3 +1,4 @@
+import { ApiError } from "../../errors.js";
 import type { VerifiedIdentity, VerifyToken } from "../../middleware/auth.js";
 
 // The BigTable handlers authenticate inside each handler (a few routes are public), so they
@@ -33,7 +34,12 @@ export async function getUserIdFromAuthHeader(authorizationHeader: string | null
   let identity: string | VerifiedIdentity;
   try {
     identity = await verifier(token);
-  } catch {
+  } catch (error) {
+    // Authentication being unavailable (not configured, signing keys unreachable) must not
+    // look like "signed out" to the app, so let it surface as a 503.
+    if (error instanceof ApiError && error.status === 503) {
+      throw error;
+    }
     return null;
   }
 
