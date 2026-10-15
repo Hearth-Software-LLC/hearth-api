@@ -25,6 +25,7 @@ import type { Cache } from './services/cache.js';
 import { createFatSecret } from './integrations/fatsecret.js';
 import { createRestaurantService } from './services/restaurants.js';
 import { registerRestaurants } from './routes/v1/restaurants.js';
+import { registerBigTable } from './bigtable/register.js';
 
 export type AppOptions = {
   config?: Config;
@@ -118,7 +119,14 @@ export function createApp(options: AppOptions = {}) {
   app.openAPIRegistry.registerComponent('securitySchemes', 'BearerAuth', {
     type: 'http', scheme: 'bearer', bearerFormat: 'JWT',
   });
-  app.use('/v1/*', authMiddleware(options.verifyToken ?? createTokenVerifier(config)));
+  const verifyToken = options.verifyToken ?? createTokenVerifier(config);
+  // Every /v1 route requires a bearer token up front, except BigTable's (/v1/bigtable/*),
+  // which authenticate inside their handlers because a few of them are public.
+  const requireAuth = authMiddleware(verifyToken);
+  app.use('/v1/*', async (context, next) => {
+    if (context.req.path.startsWith('/v1/bigtable/')) return next();
+    return requireAuth(context, next);
+  });
 
   app.openapi(createRoute({
     method: 'get',
@@ -149,9 +157,11 @@ export function createApp(options: AppOptions = {}) {
     seal: options.tokenSeal ?? (config.PLAID_TOKEN_KEY ? createTokenSeal(config.PLAID_TOKEN_KEY) : undefined),
   });
 
+  registerBigTable(app, verifyToken);
+
   app.doc('/openapi.json', {
     openapi: '3.0.0',
-    info: { title: 'Lifestyle API', version: '1.0.0' },
+    info: { title: 'Hearth API', version: '1.0.0' },
   });
 
   return app;

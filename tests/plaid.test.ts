@@ -39,7 +39,7 @@ describe('Plaid Link-token creation', () => {
     expect(await response.json()).toEqual({ linkToken: 'link-sandbox-test', expiresAt: expect.any(String), plaidRequestId: 'plaid-request-123' });
     expect(plaidLinkClient).toHaveBeenCalledWith({
       user: { client_user_id: 'verified-user-123' },
-      client_name: 'Lifestyle', products: ['transactions'], country_codes: ['US'], language: 'en',
+      client_name: 'Hearth', products: ['transactions'], country_codes: ['US'], language: 'en',
       redirect_uri: 'https://app.example.com/plaid/',
     }, expect.any(AbortSignal));
     expect(reserveQuota).toHaveBeenCalledWith('verified-user-123', 'plaid-link');
@@ -166,7 +166,7 @@ describe('Plaid Link-token creation', () => {
 
 describe('Plaid configuration', () => {
   it('defaults to sandbox, US, and a suite name but requires explicit products', () => {
-    expect(readConfig(environment)).toMatchObject({ PLAID_ENV: 'sandbox', PLAID_COUNTRY_CODES: ['US'], PLAID_CLIENT_NAME: 'Lifestyle', PLAID_PRODUCTS: ['transactions'] });
+    expect(readConfig(environment)).toMatchObject({ PLAID_ENV: 'sandbox', PLAID_COUNTRY_CODES: ['US'], PLAID_CLIENT_NAME: 'Hearth', PLAID_PRODUCTS: ['transactions'] });
   });
 
   it('parses product and country lists', () => {

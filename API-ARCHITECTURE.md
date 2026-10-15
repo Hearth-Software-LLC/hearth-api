@@ -49,7 +49,7 @@ An API-only project does not need Next.js. Add it only if a web dashboard or web
 ## Repository Layout
 
 ```text
-lifestyle-api/
+hearth-api/
   src/
     app.ts                   # Framework setup and route mounting
     index.ts                 # Native Vercel Hono entry point

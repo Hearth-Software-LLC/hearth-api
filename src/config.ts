@@ -25,13 +25,13 @@ const configSchema = z.object({
   AUTH_JWKS_URL: httpsUrl.optional(),
   UPSTASH_REDIS_REST_URL: httpsUrl.optional(),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1).optional(),
-  RATE_LIMIT_PREFIX: z.string().min(1).default('lifestyle:quota:v1'),
+  RATE_LIMIT_PREFIX: z.string().min(1).default('hearth:quota:v1'),
   LOGO_DEV_PUBLISHABLE_KEY: z.string().startsWith('pk_').min(4).optional(),
   USDA_API_KEY: z.string().min(1).optional(),
   PLAID_CLIENT_ID: z.string().trim().min(1).optional(),
   PLAID_SECRET: z.string().trim().min(1).optional(),
   PLAID_ENV: z.enum(['sandbox', 'production']).default('sandbox'),
-  PLAID_CLIENT_NAME: z.string().trim().min(1).max(30).default('Lifestyle'),
+  PLAID_CLIENT_NAME: z.string().trim().min(1).max(30).default('Hearth'),
   PLAID_PRODUCTS: products.optional(),
   PLAID_COUNTRY_CODES: countries.prefault('US'),
   PLAID_REDIRECT_URI: redirectUrl.optional(),
@@ -50,7 +50,9 @@ const configSchema = z.object({
     ['AUTH_ISSUER', 'AUTH_AUDIENCE', 'AUTH_JWKS_URL'] as const,
     ['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN'] as const,
     ['PLAID_CLIENT_ID', 'PLAID_SECRET', 'PLAID_PRODUCTS'] as const,
-    ['SUPABASE_URL', 'SUPABASE_SECRET_KEY', 'PLAID_TOKEN_KEY'] as const,
+    // The Hearth Supabase project backs BigTable data and Plaid connection storage. Banking
+    // additionally needs PLAID_TOKEN_KEY; without it, bank routes answer 503.
+    ['SUPABASE_URL', 'SUPABASE_SECRET_KEY'] as const,
     ['FATSECRET_CLIENT_ID', 'FATSECRET_CLIENT_SECRET'] as const,
   ]) {
     const count = group.filter((name) => config[name] !== undefined).length;
