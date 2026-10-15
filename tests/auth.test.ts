@@ -90,7 +90,7 @@ describe('JWT authentication', () => {
 
 describe('configuration', () => {
   it('permits a health-only deployment without credentials', () => {
-    expect(readConfig({})).toMatchObject({ RATE_LIMIT_PREFIX: 'lifestyle:quota:v1' });
+    expect(readConfig({})).toMatchObject({ RATE_LIMIT_PREFIX: 'hearth:quota:v1' });
   });
   it('rejects partial identity or Redis configuration', () => {
     expect(() => readConfig({ AUTH_ISSUER: 'https://example.com' })).toThrow('AUTH_ISSUER');

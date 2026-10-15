@@ -8,7 +8,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 }
 
 const server = serve({ fetch: createApp().fetch, hostname: '127.0.0.1', port }, (info) => {
-  console.info(`Lifestyle API listening at http://127.0.0.1:${info.port}`);
+  console.info(`Hearth API listening at http://127.0.0.1:${info.port}`);
 });
 
 process.once('SIGINT', () => server.close());

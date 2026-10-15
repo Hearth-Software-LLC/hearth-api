@@ -1,6 +1,6 @@
-# Lifestyle API
+# Hearth API
 
-A small TypeScript/Hono backend shared by an iOS app suite. Runs locally on Node.js and deploys to Vercel's native Hono runtime. No database is needed for the current reference-data lookups and Plaid Link-token creation.
+The shared TypeScript/Hono backend for the Hearth iOS apps (BigTable, Suffice, Sated, Caloma, Hearken), served at `https://api.hearthapps.com`. It runs locally on Node.js and deploys to Vercel's native Hono runtime. It combines the former Lifestyle API (reference data and banking) with the former BigTable API (meal planning, recipes, households, social), on one Supabase project.
 
 ## Implemented
 
@@ -21,6 +21,21 @@ A small TypeScript/Hono backend shared by an iOS app suite. Runs locally on Node
 | `DELETE /v1/banking/connections/{itemId}` | Linked Supabase user + shared quota | Removes the item at Plaid and deletes its stored token |
 
 All responses use `Cache-Control: no-store` and include `X-Request-ID`. Errors have the documented `{ "error": { "code", "message", "requestId" } }` structure. Logs include the matched route, status, duration, and request ID, not tokens, query strings, or provider error details.
+
+## BigTable
+
+BigTable's routes live under `/v1/bigtable/*`, with the same paths, request bodies and success responses as the old `api.bigtableapp.com/api/*` (swap the `/api/` prefix for `/v1/bigtable/`). Two things changed for clients:
+
+- **Errors** use the API-wide shape `{ "error": { "code", "message", "requestId" } }`. The old message is now `error.message`; any extra fields an error carried (such as usage details on quota errors) stay at the top level.
+- **Auth** is a Supabase access token from the Hearth project, verified locally against its signing keys. Anonymous sessions are refused (BigTable data needs an account). Place search (`/v1/bigtable/places/search`) now requires a signed-in user; it was public before.
+
+Public routes: `GET /v1/bigtable/health` (database and configuration readiness), `GET /v1/bigtable/recipes/{id}/og` (published-recipe previews, CDN-cached) and `POST /webhooks/revenuecat` (RevenueCat's shared-secret `Authorization` header). `POST /v1/bigtable/maestro/reset` only works when `MAESTRO_RESET_TOKEN` is set; leave it unset in production.
+
+The handlers in `src/bigtable/routes/` are the original Next.js route handlers, adapted to plain Web `Request`/`Response` (`src/bigtable/next-shim.ts`) and mounted by `src/bigtable/register.ts` from the table in `src/bigtable/route-table.ts`. They talk to Supabase with the secret key, so each one scopes its own reads and writes to the verified caller.
+
+## Database
+
+`supabase/` holds the Hearth project's full schema history (BigTable's migrations plus `plaid_connections`), the `expire-household-invitations` edge function and the local-development config. The production project is `kvhvsztvfpydhfpzicyy` (originally the BigTable project). Apply new migrations with `supabase db push` or the Supabase dashboard; never from the API at runtime.
 
 ## Local Development
 
@@ -62,12 +77,22 @@ Uncomment and replace the relevant settings in `.env`. Never commit it or put se
 | `PLAID_PRODUCTS` | Explicit comma-separated product list: `transactions`, `auth`, `identity`, `liabilities`, `investments` |
 | `PLAID_REDIRECT_URI` | Dashboard-registered HTTPS iOS Universal Link; no query, fragment, or embedded credentials |
 | `PLAID_ENV` | `sandbox` (default) or `production`; never use production credentials in previews |
-| `PLAID_CLIENT_NAME` | Display name in Link, 1-30 characters; default `Lifestyle` |
+| `PLAID_CLIENT_NAME` | Display name in Link, 1-30 characters; default `Hearth` |
 | `PLAID_COUNTRY_CODES` | Comma-separated Plaid country codes; default `US` |
 | `FATSECRET_CLIENT_ID` | FatSecret Platform OAuth 2.0 client ID |
 | `FATSECRET_CLIENT_SECRET` | Server-only FatSecret client secret |
 | `FATSECRET_SCOPE` | OAuth scopes; default `premier` (needed by foods.search v5) |
 | `RESTAURANT_CACHE_HOURS` | How long menus stay in the shared cache, 0–24; default 24 |
+| `SUPABASE_URL` | Hearth Supabase project URL (BigTable data, bank connections) |
+| `SUPABASE_SECRET_KEY` | Server-only Supabase secret key for that project |
+| `PLAID_TOKEN_KEY` | 32-byte base64 key that seals Plaid access tokens |
+| `ANTHROPIC_API_KEY` | BigTable AI meal plans, grocery lists and recipe import |
+| `OPENAI_API_KEY` | BigTable recipe audio transcription |
+| `GEMINI_API_KEY` | BigTable generated recipe images |
+| `GOOGLE_PLACES_API_KEY` | BigTable dine-out place search |
+| `REVENUECAT_WEBHOOK_SECRET` | Shared secret RevenueCat sends to `/webhooks/revenuecat` |
+| `REVENUECAT_SECRET_API_KEY`, `REVENUECAT_PROJECT_ID` | RevenueCat REST access for subscriber sync and account deletion |
+| `EXPO_ACCESS_TOKEN` | BigTable push notifications through Expo |
 | `PORT` | Local server port; default 3000 |
 
 Configure all three identity settings together and both Redis settings together. With Supabase, use asymmetric JWT signing keys (ES256 or RS256); legacy HS256 secrets are deliberately unsupported. Match issuer and audience to the project's actual access-token configuration. Obtain access tokens through your identity provider's supported iOS flow.
@@ -118,7 +143,7 @@ Redis failures and the rate-limit library's fail-open timeout result are convert
 
 Configure `PLAID_CLIENT_ID`, `PLAID_SECRET` and `PLAID_PRODUCTS` together, plus the identity and Redis settings. Products are deliberately not defaulted. `PLAID_REDIRECT_URI` is optional: only OAuth banks need it, and then it must be a dashboard-registered HTTPS universal link served by the app's Associated Domains (`apple-app-site-association`).
 
-Connections also need storage: `SUPABASE_URL`, `SUPABASE_SECRET_KEY` (a server-only secret key) and `PLAID_TOKEN_KEY` (32 bytes, base64; `openssl rand -base64 32`), together. Apply `supabase/migrations/*_plaid_connections.sql` (`supabase db push`). Without them the connection routes answer `503 STORAGE_NOT_CONFIGURED`.
+Connections also need storage: `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (the Hearth project, also used by BigTable) and `PLAID_TOKEN_KEY` (32 bytes, base64; `openssl rand -base64 32`). The `plaid_connections` table is in `supabase/migrations/`. Without them the connection routes answer `503 STORAGE_NOT_CONFIGURED`.
 
 **What's stored, and what isn't.** The API keeps one row per Plaid item: the owner (the verified JWT subject), the item ID, the institution's name and the access token, sealed with AES-256-GCM using `PLAID_TOKEN_KEY` and bound to its owner and item. The table has row-level security on, no policies and no grants for `anon`/`authenticated`, so app-facing keys can't read it. Transactions, balances and sync cursors are never stored server-side: the app keeps its cursor and the data, and asks for changes when it wants them. There are deliberately no webhooks or job queues; sync is app-driven.
 

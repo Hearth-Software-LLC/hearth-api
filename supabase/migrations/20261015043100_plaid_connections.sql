@@ -1,4 +1,4 @@
--- Bank connections made through Plaid. The only thing the Lifestyle API stores for banking:
+-- Bank connections made through Plaid. The only thing the Hearth API stores for banking:
 -- who connected which Plaid item, the institution's name, and the item's access token,
 -- sealed with AES-256-GCM by the API (the key is in the API's environment, not here).
 -- Transactions and balances are never stored server-side.
@@ -20,4 +20,4 @@ alter table public.plaid_connections enable row level security;
 revoke all on table public.plaid_connections from anon, authenticated;
 
 comment on table public.plaid_connections is
-  'Plaid items per user. Access tokens are sealed by lifestyle-api; never readable by app keys.';
+  'Plaid items per user. Access tokens are sealed by hearth-api; never readable by app keys.';
