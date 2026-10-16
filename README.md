@@ -75,7 +75,8 @@ Uncomment and replace the relevant settings in `.env`. Never commit it or put se
 | `PLAID_CLIENT_ID` | Server-only Plaid client ID |
 | `PLAID_SECRET` | Server-only Plaid secret for the selected environment |
 | `PLAID_PRODUCTS` | Explicit comma-separated product list: `transactions`, `auth`, `identity`, `liabilities`, `investments` |
-| `PLAID_REDIRECT_URI` | Dashboard-registered HTTPS iOS Universal Link; no query, fragment, or embedded credentials |
+| `PLAID_REDIRECT_URI` | Dashboard-registered HTTPS iOS Universal Link; no query, fragment, or embedded credentials. Use `https://api.hearthapps.com/plaid/oauth` |
+| `APPLE_APP_IDS` | Comma-separated `TEAMID.bundle.id` iOS apps that may open `/plaid/*` links; default `BH8R3BX5WF.com.stephenwarren.suffice` |
 | `PLAID_ENV` | `sandbox` (default) or `production`; never use production credentials in previews |
 | `PLAID_CLIENT_NAME` | Display name in Link, 1-30 characters; default `Hearth` |
 | `PLAID_COUNTRY_CODES` | Comma-separated Plaid country codes; default `US` |
@@ -141,7 +142,7 @@ Redis failures and the rate-limit library's fail-open timeout result are convert
 
 ### Plaid
 
-Configure `PLAID_CLIENT_ID`, `PLAID_SECRET` and `PLAID_PRODUCTS` together, plus the identity and Redis settings. Products are deliberately not defaulted. `PLAID_REDIRECT_URI` is optional: only OAuth banks need it, and then it must be a dashboard-registered HTTPS universal link served by the app's Associated Domains (`apple-app-site-association`).
+Configure `PLAID_CLIENT_ID`, `PLAID_SECRET` and `PLAID_PRODUCTS` together, plus the identity and Redis settings. Products are deliberately not defaulted. `PLAID_REDIRECT_URI` is optional: only OAuth banks need it (Chase, Bank of America, Wells Fargo, Capital One and others), and then it must be a dashboard-registered HTTPS universal link served by the app's Associated Domains. The API serves that itself: `GET /.well-known/apple-app-site-association` lists `APPLE_APP_IDS` for `/plaid/*`, and `GET /plaid/oauth` is a small "go back to the app" page for when the link opens in a browser. Set `PLAID_REDIRECT_URI=https://api.hearthapps.com/plaid/oauth`, add the same address under Allowed redirect URIs in the Plaid Dashboard, and give the app the `applinks:api.hearthapps.com` Associated Domains entitlement.
 
 Connections also need storage: `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (the Hearth project, also used by BigTable) and `PLAID_TOKEN_KEY` (32 bytes, base64; `openssl rand -base64 32`). The `plaid_connections` table is in `supabase/migrations/`. Without them the connection routes answer `503 STORAGE_NOT_CONFIGURED`.
 

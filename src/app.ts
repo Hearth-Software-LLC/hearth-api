@@ -26,6 +26,7 @@ import { createFatSecret } from './integrations/fatsecret.js';
 import { createRestaurantService } from './services/restaurants.js';
 import { registerRestaurants } from './routes/v1/restaurants.js';
 import { registerBigTable } from './bigtable/register.js';
+import { registerAppLinks } from './routes/app-links.js';
 
 export type AppOptions = {
   config?: Config;
@@ -158,6 +159,7 @@ export function createApp(options: AppOptions = {}) {
   });
 
   registerBigTable(app, verifyToken);
+  registerAppLinks(app, config);
 
   app.doc('/openapi.json', {
     openapi: '3.0.0',

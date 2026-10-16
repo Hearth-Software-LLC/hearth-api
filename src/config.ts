@@ -6,6 +6,11 @@ const redirectUrl = httpsUrl.refine((value) => {
   const url = new URL(value);
   return !url.search && !url.hash && !url.username && !url.password;
 });
+// "TEAMID.bundle.id", comma-separated: the iOS apps allowed to open this domain's Universal
+// Links (the Plaid OAuth return). Not secret; they appear in apple-app-site-association.
+const appleAppIds = z.string().transform((value) => value.split(',').map((entry) => entry.trim()).filter(Boolean))
+  .pipe(z.array(z.string().regex(/^[A-Z0-9]{10}\.[A-Za-z0-9.-]+$/)).max(20)
+    .refine((values) => new Set(values).size === values.length));
 const products = z.string().transform((value) => value.split(',').map((entry) => entry.trim()))
   .pipe(z.array(z.enum([Products.Transactions, Products.Auth, Products.Identity, Products.Liabilities, Products.Investments]))
     .min(1).max(5).refine((values) => new Set(values).size === values.length));
@@ -35,6 +40,7 @@ const configSchema = z.object({
   PLAID_PRODUCTS: products.optional(),
   PLAID_COUNTRY_CODES: countries.prefault('US'),
   PLAID_REDIRECT_URI: redirectUrl.optional(),
+  APPLE_APP_IDS: appleAppIds.prefault('BH8R3BX5WF.com.stephenwarren.suffice'),
   SUPABASE_URL: httpsUrl.optional(),
   SUPABASE_SECRET_KEY: z.string().trim().min(20).optional(),
   PLAID_TOKEN_KEY: tokenKey.optional(),
