@@ -5,6 +5,7 @@ import * as aiMealPlanRoute from './routes/ai.meal-plan.js';
 import * as aiRecipeAudioRoute from './routes/ai.recipe-audio.js';
 import * as aiRecipeImageRoute from './routes/ai.recipe-image.js';
 import * as aiRecipeScanRoute from './routes/ai.recipe-scan.js';
+import * as aiRecipeRefineRoute from './routes/ai.recipe-refine.js';
 import * as aiRecipeTranscriptRoute from './routes/ai.recipe-transcript.js';
 import * as aiRecipeUrlRoute from './routes/ai.recipe-url.js';
 import * as blocksProfileIdRoute from './routes/blocks._profileId.js';
@@ -62,6 +63,7 @@ export const bigTableRoutes: BigTableRoute[] = [
   { method: 'POST', path: '/v1/bigtable/ai/meal-plan', handler: aiMealPlanRoute.POST, auth: true },
   { method: 'POST', path: '/v1/bigtable/ai/recipe-audio', handler: aiRecipeAudioRoute.POST, auth: true },
   { method: 'POST', path: '/v1/bigtable/ai/recipe-image', handler: aiRecipeImageRoute.POST, auth: true },
+  { method: 'POST', path: '/v1/bigtable/ai/recipe-refine', handler: aiRecipeRefineRoute.POST, auth: true },
   { method: 'POST', path: '/v1/bigtable/ai/recipe-scan', handler: aiRecipeScanRoute.POST, auth: true },
   { method: 'POST', path: '/v1/bigtable/ai/recipe-transcript', handler: aiRecipeTranscriptRoute.POST, auth: true },
   { method: 'POST', path: '/v1/bigtable/ai/recipe-url', handler: aiRecipeUrlRoute.POST, auth: true },

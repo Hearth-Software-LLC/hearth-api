@@ -1,9 +1,9 @@
 import { fetchAnthropicMessages } from "./anthropic.js";
 
-const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL?.trim() || "claude-haiku-4-5-20251001";
+export const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL?.trim() || "claude-haiku-4-5-20251001";
 
 // Must stay in sync with RECIPE_QUICK_FILTERS in apps/mobile/lib/app-constants.ts (minus "All").
-const SUPPORTED_RECIPE_TAGS = [
+export const SUPPORTED_RECIPE_TAGS = [
   "breakfast", "lunch", "dinner", "dessert", "side",
   "beef", "chicken", "seafood", "pork", "lamb",
   "vegetarian", "vegan", "gluten-free", "dairy-free", "kosher", "halal", "high-protein",
@@ -36,6 +36,10 @@ export type AudioRecipeFields = {
   ingredients: string[];
   instructions: string[];
   failureReason: string | null;
+  /** Hands-on prep and cooking time in whole minutes, when known. */
+  prepMinutes?: number | null;
+  cookMinutes?: number | null;
+  difficulty?: "easy" | "medium" | "hard" | null;
 };
 
 export class RecipeAudioError extends Error {
@@ -64,16 +68,25 @@ function audioMimeTypeToExtension(mimeType: AudioMimeType): string {
   }
 }
 
+export const RECIPE_JSON_SHAPE =
+  '{"isRecipe":true,"title":"...","description":"...","baseServings":4,"prepMinutes":15,"cookMinutes":40,"difficulty":"easy","tags":["..."],"ingredients":["..."],"instructions":["..."],"failureReason":null}';
+
+export const RECIPE_TIMING_RULE =
+  "- prepMinutes and cookMinutes are whole minutes (estimate when not stated); difficulty is one of easy, medium, hard.";
+
 function buildRecipeExtractionPrompt(): string {
   return [
     "Analyze this voice note. The user is either describing a recipe or requesting one to be created.",
     "In either case, generate a complete, detailed recipe and return strict JSON only with this exact shape:",
-    '{"isRecipe":true,"title":"...","description":"...","baseServings":4,"tags":["..."],"ingredients":["..."],"instructions":["..."],"failureReason":null}',
+    RECIPE_JSON_SHAPE,
     "Rules:",
+    "- A short request (e.g. 'a casserole with chicken, broccoli and cheese') names the key ingredients, not all of them. Write a real, complete recipe a home cook would be proud of: include everything the dish needs, such as aromatics, fats, seasonings, liquids, sauces, binders and toppings.",
+    "- When the user describes their own recipe in detail, keep to what they said and only fill obvious gaps.",
     "- If the voice note has nothing to do with food or recipes, return isRecipe=false and a short failureReason. Keep all recipe fields null/empty.",
     "- If the user requests a recipe (e.g. 'make me a recipe for...'), generate a complete recipe that satisfies their request including any dietary or style constraints they mention.",
     "- description should be 1-2 concise sentences.",
     "- baseServings should be an integer between 1 and 50 when present.",
+    RECIPE_TIMING_RULE,
     `- tags must only use values from this exact list (lowercase): ${SUPPORTED_RECIPE_TAGS.join(", ")}. Do not invent tags outside this list.`,
     "- ingredients should be concise ingredient lines with amounts.",
     "- instructions should be ordered action steps without numbering (no '1.' or '1)' prefixes).",
@@ -129,8 +142,8 @@ async function extractRecipeFromTranscriptWithAnthropic(transcript: string): Pro
 
   const response = await fetchAnthropicMessages(apiKey, {
     model: ANTHROPIC_MODEL,
-    max_tokens: 1000,
-    temperature: 0,
+    max_tokens: 2500,
+    temperature: 0.4,
     messages: [
       {
         role: "user",
@@ -170,7 +183,7 @@ async function extractRecipeFromTranscriptWithAnthropic(transcript: string): Pro
 }
 
 
-function extractJsonObject(text: string): string | null {
+export function extractJsonObject(text: string): string | null {
   const fenced = text.match(/```json\s*([\s\S]*?)```/i);
   if (fenced?.[1]) {
     return fenced[1].trim();
@@ -247,7 +260,7 @@ function normalizeServings(value: unknown): number | null {
   return null;
 }
 
-function normalizeShape(payload: unknown): AudioRecipeFields | null {
+export function normalizeShape(payload: unknown): AudioRecipeFields | null {
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
     return null;
   }
@@ -268,6 +281,10 @@ function normalizeShape(payload: unknown): AudioRecipeFields | null {
   const failureReason = typeof failureReasonRaw === "string" && failureReasonRaw.trim()
     ? failureReasonRaw.trim().slice(0, 220)
     : null;
+
+  const prepMinutes = normalizeMinutes(source.prepMinutes);
+  const cookMinutes = normalizeMinutes(source.cookMinutes);
+  const difficulty = normalizeDifficulty(source.difficulty);
 
   if (!isRecipe) {
     return {
@@ -295,7 +312,27 @@ function normalizeShape(payload: unknown): AudioRecipeFields | null {
     ingredients,
     instructions,
     failureReason: null,
+    prepMinutes,
+    cookMinutes,
+    difficulty,
   };
+}
+
+function normalizeMinutes(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : NaN;
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  const rounded = Math.round(parsed);
+  return rounded >= 1 && rounded <= 2880 ? rounded : null;
+}
+
+function normalizeDifficulty(value: unknown): "easy" | "medium" | "hard" | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized === "easy" || normalized === "medium" || normalized === "hard" ? normalized : null;
 }
 
 export async function createRecipeFromAudio(input: {
