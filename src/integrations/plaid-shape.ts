@@ -27,7 +27,7 @@ const transactionSchema = z.object({
   pending: z.boolean(),
   logo_url: z.string().nullish(),
   website: z.string().nullish(),
-  personal_finance_category: z.object({ primary: z.string() }).nullish(),
+  personal_finance_category: z.object({ primary: z.string(), detailed: z.string().nullish() }).nullish(),
   location: z.object({
     address: z.string().nullish(), city: z.string().nullish(), region: z.string().nullish(),
     postal_code: z.string().nullish(), lat: z.number().nullish(), lon: z.number().nullish(),
@@ -103,6 +103,7 @@ export function toTransaction(transaction: PlaidTransaction) {
     amountCents: Math.abs(cents(transaction.amount)),
     isIncome: transaction.amount < 0,
     category: transaction.personal_finance_category?.primary ?? null,
+    categoryDetail: transaction.personal_finance_category?.detailed ?? null,
     logoUrl: transaction.logo_url ?? null,
     merchantDomain: domain(transaction.website),
     city: transaction.location?.city ?? null,

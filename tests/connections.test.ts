@@ -42,7 +42,7 @@ function memoryStore(initial: Record<string, StoredConnection & { ownerId: strin
 const plaidTransaction = (overrides: Record<string, unknown> = {}) => ({
   transaction_id: 'tx-1', account_id: 'acct-1', amount: 12.34, date: '2026-10-12', authorized_date: '2026-10-11',
   name: 'TARGET 1234', merchant_name: 'Target', pending: false, logo_url: 'https://plaid-merchant-logos.plaid.com/target.png',
-  website: 'www.target.com', personal_finance_category: { primary: 'GENERAL_MERCHANDISE' },
+  website: 'www.target.com', personal_finance_category: { primary: 'GENERAL_MERCHANDISE', detailed: 'GENERAL_MERCHANDISE_SUPERSTORES' },
   location: { address: '3401 N Thanksgiving Way', city: 'Lehi', region: 'UT', postal_code: '84043', lat: 40.39, lon: -111.85 }, ...overrides,
 });
 const plaidAccounts = {
@@ -192,7 +192,7 @@ describe('Syncing transactions', () => {
     expect(data.syncTransactions).toHaveBeenCalledWith('access-sandbox-secret', 'cursor-1', expect.any(AbortSignal));
     expect(body.added).toEqual([
       { id: 'tx-1', accountId: 'acct-1', date: '2026-10-11', payee: 'Target', amountCents: 1234, isIncome: false,
-        category: 'GENERAL_MERCHANDISE', logoUrl: 'https://plaid-merchant-logos.plaid.com/target.png', merchantDomain: 'target.com',
+        category: 'GENERAL_MERCHANDISE', categoryDetail: 'GENERAL_MERCHANDISE_SUPERSTORES', logoUrl: 'https://plaid-merchant-logos.plaid.com/target.png', merchantDomain: 'target.com',
         city: 'Lehi', address: '3401 N Thanksgiving Way, Lehi, UT 84043', latitude: 40.39, longitude: -111.85 },
       expect.objectContaining({ id: 'tx-2', payee: 'PAYROLL', amountCents: 250000, isIncome: true, logoUrl: null, merchantDomain: null,
         city: 'Provo', address: null, latitude: null }),

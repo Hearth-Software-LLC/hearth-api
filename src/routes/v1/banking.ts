@@ -33,7 +33,7 @@ const accountSchema = z.object({
 }).openapi('BankAccount');
 const transactionSchema = z.object({
   id: z.string(), accountId: z.string(), date: z.string(), payee: z.string(),
-  amountCents: z.number().int(), isIncome: z.boolean(), category: z.string().nullable(),
+  amountCents: z.number().int(), isIncome: z.boolean(), category: z.string().nullable(), categoryDetail: z.string().nullable(),
   logoUrl: z.string().nullable(), merchantDomain: z.string().nullable(),
   city: z.string().nullable(), address: z.string().nullable(), latitude: z.number().nullable(), longitude: z.number().nullable(),
 }).openapi('BankTransaction');
