@@ -51,6 +51,19 @@ const configSchema = z.object({
   // How long restaurant menus may be kept in the shared cache. Check your FatSecret plan's
   // terms for how long its data may be cached; 0 turns the cache off.
   RESTAURANT_CACHE_HOURS: z.coerce.number().int().min(0).max(24).default(24),
+  // Direct Postgres connection to the Hearth Supabase project, for Hearken study groups. Use the
+  // transaction pooler URL (port 6543) in serverless deployments.
+  DATABASE_URL: z.string().trim().regex(/^postgres(ql)?:\/\//).optional(),
+  // Apple Push Notification service (token auth). APNS_PRIVATE_KEY is the .p8 file's PEM text;
+  // literal "\n" sequences are accepted for one-line environment values.
+  APNS_KEY_ID: z.string().trim().regex(/^[A-Z0-9]{10}$/).optional(),
+  APNS_TEAM_ID: z.string().trim().regex(/^[A-Z0-9]{10}$/).optional(),
+  APNS_PRIVATE_KEY: z.string().trim().includes('PRIVATE KEY').optional(),
+  HEARKEN_APNS_TOPIC: z.string().trim().regex(/^[A-Za-z0-9.-]+$/).default('com.stephenwarren.hearken'),
+  // Vercel Cron sends it as a bearer token to /internal/* jobs.
+  CRON_SECRET: z.string().trim().min(16).optional(),
+  // Where links the API hands out point (study group invites).
+  PUBLIC_BASE_URL: httpsUrl.default('https://api.hearthapps.com'),
 }).superRefine((config, context) => {
   for (const group of [
     ['AUTH_ISSUER', 'AUTH_AUDIENCE', 'AUTH_JWKS_URL'] as const,
@@ -60,6 +73,7 @@ const configSchema = z.object({
     // additionally needs PLAID_TOKEN_KEY; without it, bank routes answer 503.
     ['SUPABASE_URL', 'SUPABASE_SECRET_KEY'] as const,
     ['FATSECRET_CLIENT_ID', 'FATSECRET_CLIENT_SECRET'] as const,
+    ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY'] as const,
   ]) {
     const count = group.filter((name) => config[name] !== undefined).length;
     if (count > 0 && count < group.length) {

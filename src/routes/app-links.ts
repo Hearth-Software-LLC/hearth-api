@@ -18,12 +18,19 @@ export function registerAppLinks(app: OpenAPIHono<ApiEnvironment>, config: Confi
   app.get('/.well-known/apple-app-site-association', (context) => {
     if (config.APPLE_APP_IDS.length === 0) return context.notFound();
     context.header('Cache-Control', 'public, max-age=3600');
+    const hearken = config.APPLE_APP_IDS.filter((id) => id.endsWith('.hearken'));
     return context.json({
       applinks: {
-        details: [{
-          appIDs: config.APPLE_APP_IDS,
-          components: [{ '/': '/plaid/*', comment: 'Plaid OAuth return' }],
-        }],
+        details: [
+          {
+            appIDs: config.APPLE_APP_IDS,
+            components: [{ '/': '/plaid/*', comment: 'Plaid OAuth return' }],
+          },
+          ...(hearken.length > 0 ? [{
+            appIDs: hearken,
+            components: [{ '/': '/hearken/join/*', comment: 'Hearken study group invites' }],
+          }] : []),
+        ],
       },
     }, 200);
   });

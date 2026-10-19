@@ -27,6 +27,11 @@ import { createRestaurantService } from './services/restaurants.js';
 import { registerRestaurants } from './routes/v1/restaurants.js';
 import { registerBigTable } from './bigtable/register.js';
 import { registerAppLinks } from './routes/app-links.js';
+import { registerHearken } from './hearken/routes.js';
+import { createHearkenService } from './hearken/service.js';
+import type { HearkenService } from './hearken/service.js';
+import { createDatabase } from './hearken/db.js';
+import { createApnsSender } from './integrations/apns.js';
 
 export type AppOptions = {
   config?: Config;
@@ -39,6 +44,8 @@ export type AppOptions = {
   connectionStore?: ConnectionStore;
   tokenSeal?: TokenSeal;
   cache?: Cache;
+  /** Hearken study groups. Built from DATABASE_URL and the APNS_* settings when not given. */
+  hearken?: HearkenService;
 };
 
 type RequestLog = {
@@ -158,6 +165,8 @@ export function createApp(options: AppOptions = {}) {
     seal: options.tokenSeal ?? (config.PLAID_TOKEN_KEY ? createTokenSeal(config.PLAID_TOKEN_KEY) : undefined),
   });
 
+  registerHearken(app, config, { service: options.hearken ?? createHearkenFromConfig(config) });
+
   registerBigTable(app, verifyToken);
   registerAppLinks(app, config);
 
@@ -167,4 +176,20 @@ export function createApp(options: AppOptions = {}) {
   });
 
   return app;
+}
+
+let sharedHearken: HearkenService | undefined;
+
+/** One database pool per process, however many times the app is built. */
+function createHearkenFromConfig(config: Config): HearkenService | undefined {
+  if (!config.DATABASE_URL) return undefined;
+  sharedHearken ??= createHearkenService({
+    sql: createDatabase(config.DATABASE_URL),
+    apns: config.APNS_KEY_ID && config.APNS_TEAM_ID && config.APNS_PRIVATE_KEY
+      ? createApnsSender({ keyId: config.APNS_KEY_ID, teamId: config.APNS_TEAM_ID, privateKey: config.APNS_PRIVATE_KEY })
+      : undefined,
+    apnsTopic: config.HEARKEN_APNS_TOPIC,
+    publicBaseUrl: config.PUBLIC_BASE_URL,
+  });
+  return sharedHearken;
 }

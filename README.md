@@ -33,6 +33,31 @@ Public routes: `GET /v1/bigtable/health` (database and configuration readiness),
 
 The handlers in `src/bigtable/routes/` are the original Next.js route handlers, adapted to plain Web `Request`/`Response` (`src/bigtable/next-shim.ts`) and mounted by `src/bigtable/register.ts` from the table in `src/bigtable/route-table.ts`. They talk to Supabase with the secret key, so each one scopes its own reads and writes to the verified caller.
 
+## Hearken study groups
+
+Study groups live under `/v1/hearken/*` (they used to be CloudKit shares). A group follows one reading plan; members see each other's weekly progress, share highlights and reflections, reply in threads (two levels, with @mentions), react, and answer a weekly question whose answers stay hidden until you answer. Anonymous sessions are refused: groups need a Sign in with Apple account.
+
+- **Storage:** `hk_*` tables from `supabase/migrations/20261019190345_hearken_study_groups.sql`, reached over a direct Postgres connection (`DATABASE_URL`, the Supabase transaction pooler on port 6543). RLS is on with no policies, so client keys can't reach them. Code: `src/hearken/service.ts` (queries, permissions, notifications) and `src/hearken/routes.ts`.
+- **Notifications:** sent straight to APNs (`src/integrations/apns.ts`) with a .p8 key, so they work for native apps. Devices register with `PUT /v1/hearken/push-tokens`. Each member chooses per group: replies to their posts, mentions, every reply, the weekly question, and daily reading activity.
+- **Scheduled work:** Vercel Cron calls `GET /internal/hearken/cron` daily at 13:00 UTC (7 AM in Utah in summer) with `CRON_SECRET`. It announces scheduled questions, tells people who haven't answered that answers are waiting (two days in, once), and purges anything deleted more than 30 days ago. A question that reaches its time between runs is announced by the first request that loads the group.
+- **Invites:** 8-character codes; links are `https://api.hearthapps.com/hearken/join/<code>`, opened in Hearken through `apple-app-site-association` when `APPLE_APP_IDS` includes `BH8R3BX5WF.com.stephenwarren.hearken`.
+- **Moving from CloudKit:** the owner's device posts the group to `POST /v1/hearken/groups/import` and leaves the returned migration token in the old CloudKit zone; each member's device claims its seat with `POST /v1/hearken/groups/claim`, which also hands back their posts and reactions.
+- **Account deletion:** `DELETE /v1/hearken/me` hands owned groups to a leader (or the longest-standing member) and removes the person's posts, replies, answers, reactions and devices.
+
+Tests in `tests/hearken/` run against a real database when `HEARKEN_TEST_DATABASE_URL` points at an empty scratch Postgres (they're skipped otherwise):
+
+```sh
+HEARKEN_TEST_DATABASE_URL=postgres://localhost/hearken_test npm test
+```
+
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Postgres connection string for the Hearth project (transaction pooler) |
+| `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_PRIVATE_KEY` | APNs auth key (.p8): its id, the team id, and the key's PEM text (`\n` escapes allowed) |
+| `HEARKEN_APNS_TOPIC` | Hearken's bundle id; default `com.stephenwarren.hearken` |
+| `CRON_SECRET` | Shared secret Vercel Cron sends to `/internal/*` (16+ characters) |
+| `PUBLIC_BASE_URL` | Base of invite links; default `https://api.hearthapps.com` |
+
 ## Database
 
 `supabase/` holds the Hearth project's full schema history (BigTable's migrations plus `plaid_connections`), the `expire-household-invitations` edge function and the local-development config. The production project is `kvhvsztvfpydhfpzicyy` (originally the BigTable project). Apply new migrations with `supabase db push` or the Supabase dashboard; never from the API at runtime.
