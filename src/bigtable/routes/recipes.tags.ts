@@ -5,13 +5,13 @@ import { normalizeCustomTagLabel } from "../lib/recipe-tags.js";
 import { supabaseAdmin } from "../lib/supabase.js";
 import { serverError } from "../lib/server-error.js";
 
-type CustomTagRow = {
+export type CustomTagRow = {
   id: string;
   label: string;
   normalized: string;
 };
 
-function toCustomTagDto(row: CustomTagRow) {
+export function toCustomTagDto(row: CustomTagRow) {
   return { id: row.id, label: row.label, normalized: row.normalized };
 }
 

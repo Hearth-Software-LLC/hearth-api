@@ -15,11 +15,16 @@ import * as grocerySnapshotsRoute from './routes/grocery.snapshots.js';
 import * as healthRoute from './routes/health.js';
 import * as householdInvitationsIdRoute from './routes/household.invitations._id.js';
 import * as householdInvitationsRoute from './routes/household.invitations.js';
+import * as householdJoinCodeRoute from './routes/household.join-code.js';
+import * as householdJoinRoute from './routes/household.join.js';
 import * as householdMembersMemberIdPermissionsRoute from './routes/household.members._memberId.permissions.js';
 import * as householdMembersMemberIdRoute from './routes/household.members._memberId.js';
 import * as inviteRoute from './routes/invite.js';
 import * as maestroResetRoute from './routes/maestro.reset.js';
+import * as meKitchenExportRoute from './routes/me.kitchen-export.js';
+import * as meKitchenMovedRoute from './routes/me.kitchen-moved.js';
 import * as meNotificationPrefsRoute from './routes/me.notification-prefs.js';
+import * as mePublicProfileRoute from './routes/me.public-profile.js';
 import * as meSocialVisibilityRoute from './routes/me.social-visibility.js';
 import * as meRoute from './routes/me.js';
 import * as notificationsRoute from './routes/notifications.js';
@@ -30,6 +35,7 @@ import * as profilesIdPublicRoute from './routes/profiles._id.public.js';
 import * as pushTokensRoute from './routes/push-tokens.js';
 import * as recipesIdLikeRoute from './routes/recipes._id.like.js';
 import * as recipesIdOgRoute from './routes/recipes._id.og.js';
+import * as recipesIdPublicationRoute from './routes/recipes._id.publication.js';
 import * as recipesIdPublishRoute from './routes/recipes._id.publish.js';
 import * as recipesIdRestoreRoute from './routes/recipes._id.restore.js';
 import * as recipesIdRoute from './routes/recipes._id.js';
@@ -78,11 +84,16 @@ export const bigTableRoutes: BigTableRoute[] = [
   { method: 'PUT', path: '/v1/bigtable/household/invitations/{id}', handler: householdInvitationsIdRoute.PUT, auth: true },
   { method: 'POST', path: '/v1/bigtable/household/invitations', handler: householdInvitationsRoute.POST, auth: true },
   { method: 'GET', path: '/v1/bigtable/household/invitations', handler: householdInvitationsRoute.GET, auth: true },
+  { method: 'POST', path: '/v1/bigtable/household/join-code', handler: householdJoinCodeRoute.POST, auth: true },
+  { method: 'POST', path: '/v1/bigtable/household/join', handler: householdJoinRoute.POST, auth: true },
   { method: 'GET', path: '/v1/bigtable/household/members/{memberId}/permissions', handler: householdMembersMemberIdPermissionsRoute.GET, auth: true },
   { method: 'PATCH', path: '/v1/bigtable/household/members/{memberId}/permissions', handler: householdMembersMemberIdPermissionsRoute.PATCH, auth: true },
   { method: 'DELETE', path: '/v1/bigtable/household/members/{memberId}', handler: householdMembersMemberIdRoute.DELETE, auth: true },
   { method: 'POST', path: '/v1/bigtable/invite', handler: inviteRoute.POST, auth: true },
   { method: 'POST', path: '/v1/bigtable/maestro/reset', handler: maestroResetRoute.POST, auth: false },
+  { method: 'GET', path: '/v1/bigtable/me/kitchen-export', handler: meKitchenExportRoute.GET, auth: true },
+  { method: 'POST', path: '/v1/bigtable/me/kitchen-moved', handler: meKitchenMovedRoute.POST, auth: true },
+  { method: 'PUT', path: '/v1/bigtable/me/public-profile', handler: mePublicProfileRoute.PUT, auth: true },
   { method: 'GET', path: '/v1/bigtable/me/notification-prefs', handler: meNotificationPrefsRoute.GET, auth: true },
   { method: 'PUT', path: '/v1/bigtable/me/notification-prefs', handler: meNotificationPrefsRoute.PUT, auth: true },
   { method: 'GET', path: '/v1/bigtable/me/social-visibility', handler: meSocialVisibilityRoute.GET, auth: true },
@@ -103,6 +114,8 @@ export const bigTableRoutes: BigTableRoute[] = [
   { method: 'GET', path: '/v1/bigtable/recipes/{id}/like', handler: recipesIdLikeRoute.GET, auth: true },
   { method: 'PUT', path: '/v1/bigtable/recipes/{id}/like', handler: recipesIdLikeRoute.PUT, auth: true },
   { method: 'GET', path: '/v1/bigtable/recipes/{id}/og', handler: recipesIdOgRoute.GET, auth: false },
+  { method: 'PUT', path: '/v1/bigtable/recipes/{id}/publication', handler: recipesIdPublicationRoute.PUT, auth: true },
+  { method: 'DELETE', path: '/v1/bigtable/recipes/{id}/publication', handler: recipesIdPublicationRoute.DELETE, auth: true },
   { method: 'POST', path: '/v1/bigtable/recipes/{id}/publish', handler: recipesIdPublishRoute.POST, auth: true },
   { method: 'POST', path: '/v1/bigtable/recipes/{id}/restore', handler: recipesIdRestoreRoute.POST, auth: true },
   { method: 'GET', path: '/v1/bigtable/recipes/{id}', handler: recipesIdRoute.GET, auth: true },

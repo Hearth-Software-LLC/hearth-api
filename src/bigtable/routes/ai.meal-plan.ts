@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "../next-shim.js";
 import { buildMealPlan } from "../lib/ai-meal-plan.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { getMembershipContext } from "../lib/household.js";
+import { contextFromHearth, parseHearthHousehold, type HearthAIContext } from "../lib/hearth-household.js";
 import { DAYS, SLOTS, type DayOfWeek, type MealSlotType } from "../lib/planner-contract.js";
 import { canConsumeCredits, getUsageStatus, incrementUsageBy } from "../lib/rate-limit.js";
 import {
@@ -38,7 +39,30 @@ type MealPlanRequest = {
   previewOnly?: boolean;
   generatedPlan?: Record<string, Record<string, string>>;
   generatedBy?: "anthropic" | "fallback";
+  /** The Hearth household, unnamed (see lib/hearth-household). Preferred over the stored household. */
+  household?: unknown;
+  /**
+   * The family's own recipes, from their iCloud. When present the request is stateless: these are
+   * the "mine" bucket, and nothing is read from or written to the stored plan.
+   */
+  myRecipes?: unknown;
 };
+
+/** A recipe from the client's own (iCloud) library, as `myRecipes` sends it. */
+type ClientRecipe = {
+  id: string;
+  title: string;
+  tags: string[];
+  minutes: number | null;
+};
+
+type RecipeLookupEntry = {
+  recipeId: string;
+  imageUrl: string | null;
+  bucket: RecipeMixBucket;
+};
+
+const MAX_MY_RECIPES = 300;
 
 type PlannerMealRole = "entree" | "side" | "dessert" | "other";
 type PlannerMealItem = {
@@ -367,6 +391,132 @@ async function loadRecipeBuckets(profileId: string): Promise<Record<RecipeMixBuc
   }
 
   return { mine, favorites, other };
+}
+
+/**
+ * Reads the optional `myRecipes`. Null when it's absent (the stored-plan mode); throws when it's
+ * there but isn't an array. Entries without an id or title are skipped; at most 300 are used.
+ */
+function parseMyRecipes(value: unknown): ClientRecipe[] | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("myRecipes must be an array");
+  }
+
+  const recipes: ClientRecipe[] = [];
+  for (const entry of value.slice(0, MAX_MY_RECIPES)) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      continue;
+    }
+    const raw = entry as Record<string, unknown>;
+    const id = typeof raw.id === "string" ? raw.id.trim().slice(0, 100) : "";
+    const title = typeof raw.title === "string" ? raw.title.trim().slice(0, 200) : "";
+    if (!id || !title) {
+      continue;
+    }
+    const tags = Array.isArray(raw.tags)
+      ? raw.tags
+          .map((tag) => (typeof tag === "string" ? tag.trim() : ""))
+          .filter(Boolean)
+          .slice(0, 20)
+      : [];
+    const minutes = typeof raw.minutes === "number" && Number.isFinite(raw.minutes) && raw.minutes >= 0
+      ? Math.round(raw.minutes)
+      : null;
+    recipes.push({ id, title, tags, minutes });
+  }
+  return recipes;
+}
+
+type SharedRecipeRow = RecipeCandidateRow & { id: string; imageUrl: string | null };
+
+// The favorites and other (published) buckets, with the ids and images a stateless response needs
+// to point the client at them. Same pools as loadRecipeBuckets.
+async function loadSharedRecipeBuckets(profileId: string): Promise<{ favorites: SharedRecipeRow[]; other: SharedRecipeRow[] }> {
+  const [savedResult, publishedResult] = await Promise.all([
+    supabaseAdmin.from("saved_recipes").select("recipe_id").eq("profile_id", profileId),
+    supabaseAdmin
+      .from("recipes")
+      .select("id, title, tags, prep_minutes, cook_minutes, image_url, created_by_profile_id")
+      .eq("status", "published")
+      .neq("created_by_profile_id", profileId),
+  ]);
+
+  if (savedResult.error) {
+    throw new Error(savedResult.error.message);
+  }
+  if (publishedResult.error) {
+    throw new Error(publishedResult.error.message);
+  }
+
+  const favoriteIds = new Set(
+    (savedResult.data ?? [])
+      .map((row) => (typeof row.recipe_id === "string" ? row.recipe_id : null))
+      .filter((id): id is string => Boolean(id))
+  );
+
+  const favorites: SharedRecipeRow[] = [];
+  const other: SharedRecipeRow[] = [];
+  for (const raw of publishedResult.data ?? []) {
+    const row = raw as RecipeRow & { image_url?: unknown };
+    const candidate = toRecipeCandidate(row);
+    if (!candidate || typeof row.id !== "string") {
+      continue;
+    }
+    const imageUrl = typeof row.image_url === "string" && row.image_url.trim() ? row.image_url.trim() : null;
+    const shared = { ...candidate, id: row.id, imageUrl };
+    if (favoriteIds.has(row.id)) {
+      favorites.push(shared);
+    } else {
+      other.push(shared);
+    }
+  }
+
+  return { favorites, other };
+}
+
+function toCandidate(recipe: RecipeCandidateRow): RecipeCandidateRow {
+  return {
+    title: recipe.title,
+    tags: recipe.tags,
+    prepMinutes: recipe.prepMinutes,
+    cookMinutes: recipe.cookMinutes,
+  };
+}
+
+/** Which bucket (and recipe) each generated title came from: mine, then favorites, then other. */
+function buildRecipeLookup(
+  generatedPlan: Record<DayOfWeek, Record<MealSlotType, string>>,
+  myRecipes: ClientRecipe[],
+  shared: { favorites: SharedRecipeRow[]; other: SharedRecipeRow[] }
+): Record<string, RecipeLookupEntry> {
+  const byTitle = new Map<string, RecipeLookupEntry>();
+  const add = (title: string, entry: RecipeLookupEntry) => {
+    const key = title.trim().toLowerCase();
+    if (key && !byTitle.has(key)) {
+      byTitle.set(key, entry);
+    }
+  };
+  myRecipes.forEach((recipe) => add(recipe.title, { recipeId: recipe.id, imageUrl: null, bucket: "mine" }));
+  shared.favorites.forEach((recipe) => add(recipe.title, { recipeId: recipe.id, imageUrl: recipe.imageUrl, bucket: "favorites" }));
+  shared.other.forEach((recipe) => add(recipe.title, { recipeId: recipe.id, imageUrl: recipe.imageUrl, bucket: "other" }));
+
+  const lookup: Record<string, RecipeLookupEntry> = {};
+  for (const day of DAYS) {
+    for (const slot of SLOTS) {
+      const key = generatedPlan[day]?.[slot]?.trim().toLowerCase();
+      if (!key) {
+        continue;
+      }
+      const entry = byTitle.get(key);
+      if (entry) {
+        lookup[key] = entry;
+      }
+    }
+  }
+  return lookup;
 }
 
 function parseExcludedMembers(value: unknown): string[] {
@@ -863,10 +1013,18 @@ export async function POST(request: NextRequest) {
   }
 
   let payload: ReturnType<typeof normalizePayload>;
+  let hearthHousehold: HearthAIContext | null;
+  let myRecipes: ClientRecipe[] | null;
   try {
     payload = normalizePayload(body);
+    hearthHousehold = parseHearthHousehold(body?.household);
+    myRecipes = parseMyRecipes(body?.myRecipes);
   } catch (error) {
     return badRequest(error instanceof Error ? error.message : "Invalid payload");
+  }
+
+  if (myRecipes) {
+    return generateStatelessMealPlan(userId, payload, hearthHousehold, myRecipes);
   }
 
   try {
@@ -902,7 +1060,7 @@ export async function POST(request: NextRequest) {
       const membership = await getMembershipContext(userId);
       const contextProfileId = membership.organizerProfileId;
       const [household, recipeBuckets] = await Promise.all([
-        getHouseholdContext(contextProfileId),
+        hearthHousehold ? contextFromHearth(hearthHousehold) : getHouseholdContext(contextProfileId),
         loadRecipeBuckets(contextProfileId),
       ]);
 
@@ -1025,6 +1183,135 @@ export async function POST(request: NextRequest) {
         resetsAt: latestUsage.resetsAt,
         canMakeRequest: latestUsage.canMakeRequest,
       },
+    });
+  } catch (error) {
+    return NextResponse.json({ error: "Failed to generate meal plan" }, { status: 500 });
+  }
+}
+
+/**
+ * The stateless meal plan: the family's recipes come in the request (`myRecipes`) and the plan goes
+ * back in the response for the app to keep in iCloud. No plan or meal slot is read or written.
+ * Every selected date with at least one slot is charged, as if overwriting, since the app only
+ * sends the slots it wants filled; a request that brings its own `generatedPlan` (nothing to
+ * generate) is not charged again.
+ */
+async function generateStatelessMealPlan(
+  userId: string,
+  payload: ReturnType<typeof normalizePayload>,
+  hearthHousehold: HearthAIContext | null,
+  myRecipes: ClientRecipe[]
+) {
+  try {
+    const usage = await getUsageStatus(userId);
+    const creditsToCharge = payload.generatedPlan ? 0 : payload.requestedCredits;
+
+    if (creditsToCharge > 0 && !canConsumeCredits(usage, creditsToCharge)) {
+      return NextResponse.json(
+        {
+          error: "Monthly AI limit reached",
+          code: "LIMIT_REACHED",
+          tier: usage.tier,
+          requestsUsed: usage.requestsUsed,
+          requestsLimit: usage.requestsLimit,
+          requestedCredits: creditsToCharge,
+          resetsAt: usage.resetsAt,
+        },
+        { status: 403 }
+      );
+    }
+
+    const membership = await getMembershipContext(userId);
+    const contextProfileId = membership.organizerProfileId;
+    const shared = await loadSharedRecipeBuckets(contextProfileId);
+
+    let generatedPlan = payload.generatedPlan;
+    let generatedBy = payload.generatedBy;
+
+    if (!generatedPlan) {
+      const household = hearthHousehold ? contextFromHearth(hearthHousehold) : await getHouseholdContext(contextProfileId);
+      const recipeBuckets: Record<RecipeMixBucket, RecipeCandidateRow[]> = {
+        mine: myRecipes.map((recipe) => ({
+          title: recipe.title,
+          tags: recipe.tags,
+          prepMinutes: null,
+          cookMinutes: recipe.minutes,
+        })),
+        favorites: shared.favorites.map(toCandidate),
+        other: shared.other.map(toCandidate),
+      };
+
+      const nonEmpty: Record<RecipeMixBucket, boolean> = {
+        mine: recipeBuckets.mine.length > 0,
+        favorites: recipeBuckets.favorites.length > 0,
+        other: recipeBuckets.other.length > 0,
+      };
+
+      if (!RECIPE_MIX_BUCKETS.some((bucket) => nonEmpty[bucket])) {
+        return NextResponse.json(
+          {
+            error: "There are no recipes available to build a meal plan from yet. Add or favorite some recipes and try again.",
+            code: "EMPTY_RECIPE_POOL",
+          },
+          { status: 422 }
+        );
+      }
+
+      const selectedCells = new Set<string>();
+      for (const [iso, slots] of Object.entries(payload.selectedDateSlots)) {
+        const day = dayNameFromIso(iso);
+        for (const slot of slots) {
+          selectedCells.add(`${day}:${slot}`);
+        }
+      }
+      const bucketTargets = apportionRecipeSlots(selectedCells.size, payload.recipeMix, nonEmpty);
+
+      const generated = await buildMealPlan({
+        prompt: payload.prompt,
+        mealStyle: payload.mealStyle,
+        quickTags: payload.quickTags,
+        householdName: household.householdName,
+        householdMembers: household.memberNames,
+        householdLikes: household.householdLikes,
+        householdDislikes: household.householdDislikes,
+        restrictions: household.restrictions,
+        selectedDateSlots: payload.selectedDateSlots,
+        recipeBuckets,
+        bucketTargets,
+      });
+      generatedPlan = generated.plan;
+      generatedBy = generated.source;
+    }
+
+    const recipeLookup = buildRecipeLookup(generatedPlan, myRecipes, shared);
+
+    let latestUsage = usage;
+    if (creditsToCharge > 0) {
+      try {
+        await incrementUsageBy(userId, "meal_plan", creditsToCharge);
+        latestUsage = await getUsageStatus(userId);
+      } catch {
+        latestUsage = {
+          ...usage,
+          requestsUsed: usage.requestsUsed + creditsToCharge,
+          canMakeRequest: canConsumeCredits(usage, creditsToCharge),
+        };
+      }
+    }
+
+    return NextResponse.json({
+      generatedPlan,
+      generatedBy,
+      usage: {
+        tier: latestUsage.tier,
+        requestsUsed: latestUsage.requestsUsed,
+        requestsLimit: latestUsage.requestsLimit,
+        creditsCharged: creditsToCharge,
+        requestedCredits: payload.requestedCredits,
+        resetsAt: latestUsage.resetsAt,
+        canMakeRequest: latestUsage.canMakeRequest,
+      },
+      recipeLookup,
     });
   } catch (error) {
     return NextResponse.json({ error: "Failed to generate meal plan" }, { status: 500 });

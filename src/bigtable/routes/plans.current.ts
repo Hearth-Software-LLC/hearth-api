@@ -127,7 +127,11 @@ async function ensureWeeklyPlan(profileId: string, weekStart: string) {
 
 async function buildPlanResponse(profileId: string, weekStart: string) {
   const plan = await ensureWeeklyPlan(profileId, weekStart);
+  return buildPlanResponseForPlan(plan);
+}
 
+/** The planner JSON (as GET /plans/current returns it) for one existing weekly_plans row. */
+export async function buildPlanResponseForPlan(plan: { id: string; week_start: string }) {
   const slotsResult = await supabaseAdmin
     .from("meal_slots")
     .select("id, day, slot, custom_meal, dine_out, recipe_items, snack_items, excluded_members, completed")

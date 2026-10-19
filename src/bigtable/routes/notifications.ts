@@ -2,6 +2,7 @@ import { NextResponse } from "../next-shim.js";
 
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { toMemberAvatarPublicUrl } from "../lib/member-avatar.js";
+import { loadPublicDisplayNames } from "../lib/public-identity.js";
 import { serverError } from "../lib/server-error.js";
 import { supabaseAdmin } from "../lib/supabase.js";
 
@@ -109,9 +110,12 @@ export async function GET(request: Request) {
       return acc;
     }, {});
 
+    const actorDisplayNames = await loadPublicDisplayNames(actorProfileIds);
     actorNameById = (actorProfiles ?? []).reduce<Record<string, string | null>>((acc, profile) => {
       const profileHouseholdName = typeof profile.household_name === "string" ? profile.household_name.trim() : "";
-      acc[profile.id] = actorMemberNameById[profile.id] ?? (profileHouseholdName.length > 0 ? profileHouseholdName : null);
+      acc[profile.id] = actorDisplayNames.get(profile.id)
+        ?? actorMemberNameById[profile.id]
+        ?? (profileHouseholdName.length > 0 ? profileHouseholdName : null);
       return acc;
     }, {});
 

@@ -82,9 +82,40 @@ async function getUsage(profileId: string, key: string): Promise<AiUsageRow | nu
   return data;
 }
 
+/**
+ * The tier that applies to someone: their own, or their household organizer's when that's
+ * better. Families share the organizer's subscription (joined with the household join code),
+ * with no limit on how many people.
+ */
+async function effectiveTier(profileId: string): Promise<SubscriptionTier> {
+  const own = await getOrCreateSubscriptionTier(profileId);
+  if (own !== "free") {
+    return own;
+  }
+  const { data, error } = await supabaseAdmin
+    .from("household_memberships")
+    .select("organizer_id")
+    .eq("member_id", profileId)
+    .maybeSingle();
+  const organizerId = !error && typeof data?.organizer_id === "string" ? data.organizer_id : null;
+  if (!organizerId || organizerId === profileId) {
+    return own;
+  }
+  const organizer = await supabaseAdmin
+    .from("subscriptions")
+    .select("tier")
+    .eq("profile_id", organizerId)
+    .maybeSingle();
+  if (organizer.error) {
+    return own;
+  }
+  const organizerTier = normalizeSubscriptionTier(organizer.data?.tier);
+  return organizerTier !== "free" ? organizerTier : own;
+}
+
 export async function getUsageStatus(profileId: string) {
   const key = monthKeyUTC();
-  const [tier, usage] = await Promise.all([getOrCreateSubscriptionTier(profileId), getUsage(profileId, key)]);
+  const [tier, usage] = await Promise.all([effectiveTier(profileId), getUsage(profileId, key)]);
 
   const mealPlanCount = usage?.meal_plan_count ?? 0;
   const groceryListCount = usage?.grocery_list_count ?? 0;

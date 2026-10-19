@@ -208,6 +208,28 @@ function parseSnapshotRecord(row: SnapshotRecord) {
   };
 }
 
+/** The snapshots payload GET /grocery/snapshots returns, for one (organizer) profile. */
+export async function loadGrocerySnapshotsPayload(profileId: string) {
+  const result = await supabaseAdmin
+    .from("grocery_snapshots")
+    .select("id, generated_at, item_count, estimated_cost, source, sections, checks, is_active")
+    .eq("user_id", profileId)
+    .order("generated_at", { ascending: false })
+    .limit(5);
+
+  if (result.error) {
+    throw new Error(result.error.message);
+  }
+
+  const snapshots = (result.data ?? []).map((row) => parseSnapshotRecord(row as SnapshotRecord));
+  const activeSnapshot = (result.data ?? []).find((row) => row.is_active);
+
+  return {
+    snapshots,
+    activeSnapshotId: (activeSnapshot?.id as string | undefined) ?? snapshots[0]?.id ?? null,
+  };
+}
+
 export async function GET(request: NextRequest) {
   const userId = await getUserIdFromAuthHeader(request.headers.get("authorization"));
   if (!userId) {
@@ -218,24 +240,7 @@ export async function GET(request: NextRequest) {
     const membership = await getMembershipContext(userId);
     const effectiveUserId = membership.organizerProfileId;
 
-    const result = await supabaseAdmin
-      .from("grocery_snapshots")
-      .select("id, generated_at, item_count, estimated_cost, source, sections, checks, is_active")
-      .eq("user_id", effectiveUserId)
-      .order("generated_at", { ascending: false })
-      .limit(5);
-
-    if (result.error) {
-      throw new Error(result.error.message);
-    }
-
-    const snapshots = (result.data ?? []).map((row) => parseSnapshotRecord(row as SnapshotRecord));
-    const activeSnapshot = (result.data ?? []).find((row) => row.is_active);
-
-    return NextResponse.json({
-      snapshots,
-      activeSnapshotId: activeSnapshot?.id ?? snapshots[0]?.id ?? null,
-    });
+    return NextResponse.json(await loadGrocerySnapshotsPayload(effectiveUserId));
   } catch (error) {
     return serverError("GET /api/grocery/snapshots failed", "Failed to load grocery snapshots", error);
   }

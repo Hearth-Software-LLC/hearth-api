@@ -2,6 +2,7 @@ import { NextResponse } from "../next-shim.js";
 
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { toMemberAvatarPublicUrl } from "../lib/member-avatar.js";
+import { loadPublicDisplayNames } from "../lib/public-identity.js";
 import { parseRecipeVersionContent } from "../lib/recipe-versioning.js";
 import { supabaseAdmin } from "../lib/supabase.js";
 import { serverError } from "../lib/server-error.js";
@@ -14,7 +15,7 @@ type CreateRecipeIngredientPayload = {
   measurementType: string | null;
 };
 
-type CreateRecipePayload = {
+export type CreateRecipePayload = {
   title: string;
   imageUrl: string;
   description: string | null;
@@ -33,7 +34,7 @@ function badRequest(message: string) {
   return NextResponse.json({ error: message }, { status: 400 });
 }
 
-function normalizeCreatePayload(payload: JsonObject): CreateRecipePayload {
+export function normalizeCreatePayload(payload: JsonObject): CreateRecipePayload {
   const titleRaw = payload.title;
   if (typeof titleRaw !== "string" || !titleRaw.trim()) {
     throw new Error("title is required");
@@ -235,6 +236,7 @@ export async function GET(request: Request) {
     return serverError("GET /api/recipes creator organizer lookup failed", "Failed to fetch recipes", creatorOrganizersLookup.error);
   }
 
+  const creatorDisplayNames = await loadPublicDisplayNames(creatorProfileIds);
   const favoriteIds = new Set((favoritesLookup.data ?? []).map((row) => row.recipe_id));
   const likedIds = new Set((likesLookup.data ?? []).map((row) => row.recipe_id));
 
@@ -319,7 +321,10 @@ export async function GET(request: Request) {
         isLiked: likedIds.has(recipe.id),
         likeCount: recipe.like_count ?? 0,
         createdByProfileId: recipe.created_by_profile_id,
-        creatorName: creatorOrganizer?.name ?? creatorProfile?.household_name ?? null,
+        creatorName: (typeof creatorProfileId === "string" ? creatorDisplayNames.get(creatorProfileId) : undefined)
+          ?? creatorOrganizer?.name
+          ?? creatorProfile?.household_name
+          ?? null,
         creatorAvatarUrl: toMemberAvatarPublicUrl(creatorOrganizer?.avatar_url ?? creatorProfile?.avatar_url ?? null),
         status: recipe.status,
         currentVersionId: recipe.current_version_id,

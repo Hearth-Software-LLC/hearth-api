@@ -432,6 +432,70 @@ describe("POST /api/ai/meal-plan", () => {
     expect(mealPlanArgs.restrictions).toEqual(expect.arrayContaining(["no pork", "nut allergy", "gluten free"]));
   });
 
+  it("uses the Hearth household from the request instead of the stored one, without names", async () => {
+    getUserIdFromAuthHeader.mockResolvedValue("organizer-1");
+    membershipOrganizerId = null;
+    linkedMemberIds = [];
+    dietaryRestrictionRows = [{ value: "no pork", profile_id: "organizer-1" }];
+    getUsageStatus.mockResolvedValue({
+      tier: "pro",
+      requestsUsed: 2,
+      requestsLimit: 1000000,
+      resetsAt: "2026-06-01T00:00:00.000Z",
+      canMakeRequest: true,
+    });
+    buildMealPlan.mockResolvedValue({
+      source: "fallback",
+      plan: {
+        monday: { breakfast: "A", lunch: "B", dinner: "C" },
+        tuesday: { breakfast: "A", lunch: "B", dinner: "C" },
+        wednesday: { breakfast: "A", lunch: "B", dinner: "C" },
+        thursday: { breakfast: "A", lunch: "B", dinner: "C" },
+        friday: { breakfast: "A", lunch: "B", dinner: "C" },
+        saturday: { breakfast: "A", lunch: "B", dinner: "C" },
+        sunday: { breakfast: "A", lunch: "B", dinner: "C" },
+      },
+    });
+
+    const { POST } = await import("../../src/bigtable/routes/ai.meal-plan.js");
+    const response = await POST(
+      buildAuthenticatedJsonRequest("http://localhost/api/ai/meal-plan", {
+        prompt: "busy week",
+        household: {
+          people: [{ age: 41, role: "parent" }, { age: 9, role: "kid" }, { role: "adult" }],
+          allergies: ["Peanuts", "peanuts"],
+          restrictions: ["Vegetarian"],
+          likes: ["Tacos"],
+          dislikes: ["Olives"],
+        },
+      }) as never
+    );
+
+    expect(response.status).toBe(200);
+    const args = buildMealPlan.mock.calls[0]?.[0] as {
+      householdName: string | null;
+      householdMembers: string[];
+      householdLikes: string[];
+      householdDislikes: string[];
+      restrictions: string[];
+    };
+    expect(args.householdName).toBeNull();
+    expect(args.householdMembers).toEqual(["Parent, 41", "Kid, 9", "Adult"]);
+    expect(args.restrictions).toEqual(["Allergy (never include): Peanuts", "Vegetarian"]);
+    expect(args.householdLikes).toEqual(["Tacos"]);
+    expect(args.householdDislikes).toEqual(["Olives"]);
+  });
+
+  it("rejects a malformed Hearth household", async () => {
+    getUserIdFromAuthHeader.mockResolvedValue("user-1");
+    const { POST } = await import("../../src/bigtable/routes/ai.meal-plan.js");
+    const response = await POST(
+      buildAuthenticatedJsonRequest("http://localhost/api/ai/meal-plan", { prompt: "busy week", household: { people: "two" } }) as never
+    );
+    expect(response.status).toBe(400);
+    expect(buildMealPlan).not.toHaveBeenCalled();
+  });
+
   it("includes user-owned private recipes in the meal plan catalog", async () => {
     getUserIdFromAuthHeader.mockResolvedValue("user-1");
     getUsageStatus

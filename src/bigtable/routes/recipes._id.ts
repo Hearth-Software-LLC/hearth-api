@@ -2,6 +2,7 @@ import { NextResponse } from "../next-shim.js";
 
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { toMemberAvatarPublicUrl } from "../lib/member-avatar.js";
+import { loadPublicDisplayNames } from "../lib/public-identity.js";
 import { parseRecipeVersionContent } from "../lib/recipe-versioning.js";
 import { supabaseAdmin } from "../lib/supabase.js";
 import { serverError } from "../lib/server-error.js";
@@ -181,6 +182,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   }
 
   let creatorProfile: { household_name: string | null; avatar_url: string | null } | null = null;
+  let creatorDisplayName: string | null = null;
   let creatorMemberIdentity: { name: string | null; avatar_url: string | null } | null = null;
   if (typeof recipe.created_by_profile_id === "string" && recipe.created_by_profile_id.trim().length > 0) {
     const [creatorProfileLookup, creatorLinkedMemberLookup, creatorOwnMemberLookup] = await Promise.all([
@@ -227,6 +229,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
 
     creatorProfile = creatorProfileRow;
     creatorMemberIdentity = creatorLinkedMemberRow ?? creatorOwnMemberRow;
+    creatorDisplayName = (await loadPublicDisplayNames([recipe.created_by_profile_id])).get(recipe.created_by_profile_id) ?? null;
   }
 
   const canRenderRequestedVersion = Boolean(
@@ -340,7 +343,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
       isLiked: Boolean(likeRow),
       likeCount: recipe.like_count ?? 0,
       createdByProfileId: recipe.created_by_profile_id,
-      creatorName: creatorMemberIdentity?.name ?? creatorProfile?.household_name ?? null,
+      creatorName: creatorDisplayName ?? creatorMemberIdentity?.name ?? creatorProfile?.household_name ?? null,
       creatorAvatarUrl: toMemberAvatarPublicUrl(creatorMemberIdentity?.avatar_url ?? creatorProfile?.avatar_url ?? null),
       status: recipe.status,
       currentVersionId: recipe.current_version_id,

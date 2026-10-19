@@ -2,6 +2,7 @@ import { NextResponse } from "../next-shim.js";
 
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { toMemberAvatarPublicUrl } from "../lib/member-avatar.js";
+import { loadPublicDisplayName } from "../lib/public-identity.js";
 import { serverError } from "../lib/server-error.js";
 import { supabaseAdmin } from "../lib/supabase.js";
 
@@ -105,6 +106,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   }
 
   const organizerMember = linkedMemberLookup.data ?? ownMemberLookup.data;
+  const displayName = await loadPublicDisplayName(profileId);
 
   const [followersCountResult, followingCountResult] = await Promise.all([
     supabaseAdmin
@@ -151,7 +153,7 @@ export async function GET(request: Request, context: { params: Promise<{ id: str
   return NextResponse.json({
     profile: {
       profileId: profile.id,
-      profileName: organizerMember?.name ?? profile.household_name,
+      profileName: displayName ?? organizerMember?.name ?? profile.household_name,
       avatarUrl: toMemberAvatarPublicUrl(organizerMember?.avatar_url ?? profile.avatar_url),
       joinedAt: profile.created_at,
       followerCount,

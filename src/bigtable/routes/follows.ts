@@ -3,6 +3,7 @@ import { NextResponse } from "../next-shim.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { toMemberAvatarPublicUrl } from "../lib/member-avatar.js";
 import { notifyNewFollower } from "../lib/notifications.js";
+import { loadAllPublicDisplayNames, loadPublicDisplayNames } from "../lib/public-identity.js";
 import { serverError } from "../lib/server-error.js";
 import { supabaseAdmin } from "../lib/supabase.js";
 
@@ -88,6 +89,7 @@ export async function GET(request: Request) {
       return serverError("GET /api/follows discover blocks lookup failed", "Failed to fetch follows", blocksError);
     }
 
+    const displayNames = await loadAllPublicDisplayNames();
     const organizerByProfileId = (organizers ?? []).reduce<Record<string, { name: string | null; avatarUrl: string | null }>>(
       (acc, member) => {
         const profileId = typeof member.profile_id === "string" ? member.profile_id : "";
@@ -160,7 +162,7 @@ export async function GET(request: Request) {
         const followerCount = followerCountByProfileId[profile.id] ?? 0;
         const followingCount = followingCountByProfileId[profile.id] ?? 0;
         const publishedRecipeCount = publishedCountByProfileId[profile.id] ?? 0;
-        const profileNameRaw = organizer?.name ?? profile.household_name ?? null;
+        const profileNameRaw = displayNames.get(profile.id) ?? organizer?.name ?? profile.household_name ?? null;
         const profileName = typeof profileNameRaw === "string" ? profileNameRaw.trim() : "";
         if (!profileName) {
           return null;
@@ -272,6 +274,7 @@ export async function GET(request: Request) {
       return serverError("GET /api/follows current-following lookup failed", "Failed to fetch follows", currentFollowingError);
     }
 
+    const displayNames = await loadPublicDisplayNames(profileIds);
     const organizerByProfileId = (organizerRows ?? []).reduce<
       Record<string, { name: string | null; avatarUrl: string | null }>
     >((acc, member) => {
@@ -293,7 +296,7 @@ export async function GET(request: Request) {
         }
         const organizer = organizerByProfileId[profile.id];
         acc[profile.id] = {
-          profileName: organizer?.name ?? profile.household_name ?? null,
+          profileName: displayNames.get(profile.id) ?? organizer?.name ?? profile.household_name ?? null,
           avatarUrl: organizer?.avatarUrl ?? profile.avatar_url ?? null,
         };
         return acc;

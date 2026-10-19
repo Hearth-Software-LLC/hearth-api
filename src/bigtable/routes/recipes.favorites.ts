@@ -2,6 +2,7 @@ import { NextResponse } from "../next-shim.js";
 
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { toMemberAvatarPublicUrl } from "../lib/member-avatar.js";
+import { loadPublicDisplayNames } from "../lib/public-identity.js";
 import { parseRecipeVersionContent } from "../lib/recipe-versioning.js";
 import { supabaseAdmin } from "../lib/supabase.js";
 import { serverError } from "../lib/server-error.js";
@@ -109,6 +110,7 @@ export async function GET(request: Request) {
     )
   );
 
+  const creatorDisplayNames = await loadPublicDisplayNames(creatorProfileIds);
   const creatorProfileById = new Map<string, { household_name: string | null; avatar_url: string | null }>();
   const creatorOrganizerById = new Map<string, { name: string | null; avatar_url: string | null }>();
 
@@ -187,7 +189,10 @@ export async function GET(request: Request) {
         isLiked: likedIds.has(recipe.id),
         likeCount: recipe.like_count ?? 0,
         createdByProfileId: recipe.created_by_profile_id,
-        creatorName: creatorOrganizer?.name ?? creatorProfile?.household_name ?? null,
+        creatorName: (typeof creatorProfileId === "string" ? creatorDisplayNames.get(creatorProfileId) : undefined)
+          ?? creatorOrganizer?.name
+          ?? creatorProfile?.household_name
+          ?? null,
         creatorAvatarUrl: toMemberAvatarPublicUrl(creatorOrganizer?.avatar_url ?? creatorProfile?.avatar_url ?? null),
         status: recipe.status,
         currentVersionId: recipe.current_version_id,

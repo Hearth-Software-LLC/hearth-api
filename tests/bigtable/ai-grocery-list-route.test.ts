@@ -242,6 +242,41 @@ describe("POST /api/ai/grocery-list", () => {
     expect(body.generatedBy).toBe("fallback");
   });
 
+  it("uses the Hearth household from the request, with allergies as hard rules", async () => {
+    fromMock.mockImplementation((table: string) => createTableMock(table, true));
+    getUserIdFromAuthHeader.mockResolvedValue("user-1");
+    getUsageStatus.mockResolvedValue(usageFixture({ requestsUsed: 2, requestsLimit: 120 }));
+    buildGroceryList.mockResolvedValue({
+      source: "fallback",
+      groceryList: [{ section: "Produce", items: [{ id: "item-1", name: "Spinach", quantity: "2 bags" }] }],
+    });
+
+    const { POST } = await import("../../src/bigtable/routes/ai.grocery-list.js");
+    const response = await POST(
+      buildAuthenticatedJsonRequest("http://localhost/api/ai/grocery-list", {
+        weekStart: "2026-05-24",
+        household: { people: [{ age: 38, role: "parent" }, { age: 6, role: "kid" }], allergies: ["Sesame"], restrictions: [], likes: [], dislikes: [] },
+      }) as never
+    );
+
+    expect(response.status).toBe(200);
+    const args = buildGroceryList.mock.calls[0]?.[0] as { householdMembers: string[]; restrictions: string[]; householdName: string | null };
+    expect(args.householdMembers).toEqual(["Parent, 38", "Kid, 6"]);
+    expect(args.restrictions).toEqual(["Allergy (never include): Sesame"]);
+    expect(args.householdName).toBeNull();
+  });
+
+  it("rejects a malformed Hearth household", async () => {
+    fromMock.mockImplementation((table: string) => createTableMock(table, true));
+    getUserIdFromAuthHeader.mockResolvedValue("user-1");
+    const { POST } = await import("../../src/bigtable/routes/ai.grocery-list.js");
+    const response = await POST(
+      buildAuthenticatedJsonRequest("http://localhost/api/ai/grocery-list", { weekStart: "2026-05-24", household: [] }) as never
+    );
+    expect(response.status).toBe(400);
+    expect(buildGroceryList).not.toHaveBeenCalled();
+  });
+
   it("returns 403 when caller is a household member", async () => {
     fromMock.mockImplementation((table: string) => createTableMock(table, true));
     getUserIdFromAuthHeader.mockResolvedValue("member-1");

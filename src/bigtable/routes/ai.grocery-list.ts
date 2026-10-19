@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "../next-shim.js";
 
 import { buildGroceryList, GroceryListGenerationError } from "../lib/ai-grocery-list.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
+import { contextFromHearth, parseHearthHousehold, type HearthAIContext } from "../lib/hearth-household.js";
 import { getMembershipContext } from "../lib/household.js";
 import { DAYS, SLOTS } from "../lib/planner-contract.js";
 import { canConsumeCredits, getUsageStatus, incrementUsageBy } from "../lib/rate-limit.js";
@@ -15,6 +16,13 @@ type GroceryRequest = {
   endDate?: string;
   overwriteExisting?: boolean;
   additionalPrompt?: string;
+  /** The Hearth household, unnamed (see lib/hearth-household). Preferred over the stored household. */
+  household?: unknown;
+  /**
+   * The planned meals, from the app's iCloud plan. When present the request is stateless: the
+   * stored plan isn't read, and these meals (with their own ingredients, when sent) are used.
+   */
+  plannedMeals?: unknown;
 };
 
 type PlannedMeal = {
@@ -24,6 +32,21 @@ type PlannedMeal = {
   title: string;
   eaters: number;
 };
+
+type ProvidedIngredient = {
+  name: string;
+  amount: number | null;
+  measurementType: string | null;
+};
+
+/** A planned meal as the stateless request sends it: optionally with its recipe's ingredients. */
+type ClientPlannedMeal = PlannedMeal & {
+  baseServings: number | null;
+  ingredients: ProvidedIngredient[] | null;
+};
+
+const MAX_PLANNED_MEALS = 200;
+const MAX_MEAL_INGREDIENTS = 100;
 
 type IngredientNeed = {
   name: string;
@@ -287,6 +310,86 @@ async function getMealsForDateSelection(
   };
 }
 
+/**
+ * Reads the optional `plannedMeals`. Null when absent; throws when it isn't an array. Entries
+ * without a title are skipped; at most 200 are used.
+ */
+function parsePlannedMeals(value: unknown): ClientPlannedMeal[] | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error("plannedMeals must be an array");
+  }
+
+  const meals: ClientPlannedMeal[] = [];
+  for (const entry of value.slice(0, MAX_PLANNED_MEALS)) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      continue;
+    }
+    const raw = entry as Record<string, unknown>;
+    const title = typeof raw.title === "string" ? raw.title.trim().slice(0, 200) : "";
+    if (!title) {
+      continue;
+    }
+    const isoDate = typeof raw.isoDate === "string" ? raw.isoDate.trim() : "";
+    if (isoDate && !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) {
+      throw new Error("plannedMeals isoDate must be YYYY-MM-DD");
+    }
+    const eatersRaw = toNumberOrNull(raw.eaters);
+    const eaters = eatersRaw !== null && eatersRaw >= 1 ? Math.min(Math.floor(eatersRaw), 100) : 1;
+    const baseServingsRaw = toNumberOrNull(raw.baseServings);
+    const baseServings = baseServingsRaw !== null && baseServingsRaw > 0 ? baseServingsRaw : null;
+
+    let ingredients: ProvidedIngredient[] | null = null;
+    if (Array.isArray(raw.ingredients)) {
+      ingredients = raw.ingredients
+        .slice(0, MAX_MEAL_INGREDIENTS)
+        .map((item): ProvidedIngredient | null => {
+          if (typeof item !== "object" || item === null || Array.isArray(item)) {
+            return null;
+          }
+          const ingredient = item as Record<string, unknown>;
+          const name = typeof ingredient.name === "string" ? ingredient.name.trim().slice(0, 120) : "";
+          if (!name) {
+            return null;
+          }
+          const measurementType = typeof ingredient.measurementType === "string" && ingredient.measurementType.trim()
+            ? ingredient.measurementType.trim().slice(0, 40)
+            : null;
+          return { name, amount: toNumberOrNull(ingredient.amount), measurementType };
+        })
+        .filter((item): item is ProvidedIngredient => item !== null);
+    }
+
+    meals.push({
+      isoDate,
+      day: typeof raw.day === "string" ? raw.day.trim().toLowerCase().slice(0, 20) : "",
+      slot: typeof raw.slot === "string" ? raw.slot.trim().toLowerCase().slice(0, 20) : "",
+      title,
+      eaters,
+      baseServings,
+      ingredients,
+    });
+  }
+  return meals;
+}
+
+/** The meal context from client-sent meals, worded as getMealsForDateSelection words it. */
+function mealContextFromClient(plannedMeals: ClientPlannedMeal[], householdSize: number) {
+  const meals = plannedMeals.map((meal) => {
+    const away = householdSize - meal.eaters;
+    return away > 0
+      ? `${meal.title} (make a smaller portion; ${away} household member(s) are away)`
+      : meal.title;
+  });
+  return {
+    meals,
+    recipeTitles: Array.from(new Set(plannedMeals.map((meal) => meal.title))).sort((a, b) => a.localeCompare(b)),
+    plannedMeals: plannedMeals.map(({ isoDate, day, slot, title, eaters }) => ({ isoDate, day, slot, title, eaters })),
+  };
+}
+
 function toNumberOrNull(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -312,7 +415,44 @@ function isMissingSchemaError(error: { code?: string; message?: string } | null 
   return message.includes("does not exist") || message.includes("could not find");
 }
 
-async function buildIngredientNeeds(plannedMeals: PlannedMeal[]): Promise<IngredientNeed[]> {
+type IngredientSourceMeal = PlannedMeal & {
+  baseServings?: number | null;
+  ingredients?: ProvidedIngredient[] | null;
+};
+
+type ScaledIngredient = { name: string; quantity: number | null; unit: string | null; notes: string | null };
+
+/**
+ * Ingredient needs across the planned meals. Meals that bring their own ingredients (the
+ * stateless request) use those, scaled from their baseServings (default 8); the rest are looked
+ * up as published recipes by title, as before.
+ */
+async function buildIngredientNeeds(plannedMeals: IngredientSourceMeal[]): Promise<IngredientNeed[]> {
+  const providedMeals = plannedMeals.filter((meal) => Array.isArray(meal.ingredients) && meal.ingredients.length > 0);
+  const lookupMeals = plannedMeals.filter((meal) => !(Array.isArray(meal.ingredients) && meal.ingredients.length > 0));
+
+  const lookedUp = await lookUpRecipeIngredients(lookupMeals);
+  const sources: Array<{ meal: PlannedMeal; title: string; baseServings: number; ingredients: ScaledIngredient[] }> = [
+    ...providedMeals.map((meal) => ({
+      meal,
+      title: meal.title,
+      baseServings: typeof meal.baseServings === "number" && meal.baseServings > 0 ? meal.baseServings : 8,
+      ingredients: (meal.ingredients ?? []).map((ingredient) => ({
+        name: ingredient.name,
+        quantity: ingredient.amount,
+        unit: ingredient.measurementType,
+        notes: null,
+      })),
+    })),
+    ...lookedUp,
+  ];
+
+  return aggregateIngredientNeeds(sources);
+}
+
+async function lookUpRecipeIngredients(
+  plannedMeals: PlannedMeal[]
+): Promise<Array<{ meal: PlannedMeal; title: string; baseServings: number; ingredients: ScaledIngredient[] }>> {
   const recipeTitles = Array.from(new Set(plannedMeals.map((meal) => meal.title.trim()).filter(Boolean)));
   if (recipeTitles.length === 0) {
     return [];
@@ -416,6 +556,24 @@ async function buildIngredientNeeds(plannedMeals: PlannedMeal[]): Promise<Ingred
     ingredientsByRecipeId.set(ingredient.recipe_id, current);
   });
 
+  return plannedMeals.flatMap((plannedMeal) => {
+    const recipe = recipeByLowerTitle.get(plannedMeal.title.trim().toLowerCase());
+    if (!recipe) {
+      return [];
+    }
+
+    const recipeIngredients = ingredientsByRecipeId.get(recipe.id) ?? [];
+    if (recipeIngredients.length === 0) {
+      return [];
+    }
+
+    return [{ meal: plannedMeal, title: recipe.title, baseServings: recipe.baseServings, ingredients: recipeIngredients }];
+  });
+}
+
+function aggregateIngredientNeeds(
+  sources: Array<{ meal: PlannedMeal; title: string; baseServings: number; ingredients: ScaledIngredient[] }>
+): IngredientNeed[] {
   const aggregate = new Map<string, {
     name: string;
     unit: string | null;
@@ -425,17 +583,8 @@ async function buildIngredientNeeds(plannedMeals: PlannedMeal[]): Promise<Ingred
     notes: Set<string>;
   }>();
 
-  plannedMeals.forEach((plannedMeal) => {
-    const recipe = recipeByLowerTitle.get(plannedMeal.title.trim().toLowerCase());
-    if (!recipe) {
-      return;
-    }
-
-    const recipeIngredients = ingredientsByRecipeId.get(recipe.id) ?? [];
-    if (recipeIngredients.length === 0) {
-      return;
-    }
-
+  sources.forEach(({ meal: plannedMeal, title, baseServings, ingredients: recipeIngredients }) => {
+    const recipe = { title, baseServings };
     const scale = Math.max(plannedMeal.eaters, 1) / Math.max(recipe.baseServings, 1);
     recipeIngredients.forEach((ingredient) => {
       const key = `${ingredient.name.toLowerCase()}::${ingredient.unit?.toLowerCase() ?? ""}`;
@@ -540,6 +689,18 @@ export async function POST(request: NextRequest) {
     body = {};
   }
 
+  let hearthHousehold: HearthAIContext | null;
+  let clientPlannedMeals: ClientPlannedMeal[] | null;
+  try {
+    hearthHousehold = parseHearthHousehold(body.household);
+    clientPlannedMeals = parsePlannedMeals(body.plannedMeals);
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Invalid household" },
+      { status: 400 }
+    );
+  }
+
   const costcoMode = Boolean(body.costcoMode);
   const additionalPrompt = typeof body.additionalPrompt === "string" ? body.additionalPrompt.trim().slice(0, 500) : "";
   let dateSelection: ReturnType<typeof normalizeDateSelection>;
@@ -569,15 +730,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const household = await getHouseholdContext(userId);
-    const householdSize = Math.max(household.memberNames.length, 1);
-    const mealContext = await getMealsForDateSelection(
-      userId,
-      dateSelection.dateSet,
-      dateSelection.minDate,
-      dateSelection.maxDate,
-      householdSize
-    );
+    const household = hearthHousehold ? contextFromHearth(hearthHousehold) : await getHouseholdContext(userId);
+    // Stateless (plannedMeals sent): the household is the Hearth one when sent, else as big as the
+    // biggest meal. Nothing is read from the stored plan.
+    const householdSize = clientPlannedMeals
+      ? Math.max(hearthHousehold ? hearthHousehold.people.length : Math.max(0, ...clientPlannedMeals.map((meal) => meal.eaters)), 1)
+      : Math.max(household.memberNames.length, 1);
+    const mealContext = clientPlannedMeals
+      ? mealContextFromClient(clientPlannedMeals, householdSize)
+      : await getMealsForDateSelection(
+          userId,
+          dateSelection.dateSet,
+          dateSelection.minDate,
+          dateSelection.maxDate,
+          householdSize
+        );
 
     if (mealContext.meals.length === 0) {
       return NextResponse.json(
@@ -590,7 +757,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const ingredientNeeds = await buildIngredientNeeds(mealContext.plannedMeals);
+    const ingredientNeeds = await buildIngredientNeeds(clientPlannedMeals ?? mealContext.plannedMeals);
     const generated = await buildGroceryList({
       meals: mealContext.meals,
       recipeTitles: mealContext.recipeTitles,
