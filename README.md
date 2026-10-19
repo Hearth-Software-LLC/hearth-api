@@ -117,7 +117,8 @@ Uncomment and replace the relevant settings in `.env`. Never commit it or put se
 | `GEMINI_API_KEY` | BigTable generated recipe images |
 | `GOOGLE_PLACES_API_KEY` | BigTable dine-out place search |
 | `REVENUECAT_WEBHOOK_SECRET` | Shared secret RevenueCat sends to `/webhooks/revenuecat` |
-| `REVENUECAT_SECRET_API_KEY`, `REVENUECAT_PROJECT_ID` | RevenueCat REST access for subscriber sync and account deletion |
+| `REVENUECAT_SECRET_API_KEY`, `REVENUECAT_PROJECT_ID` | RevenueCat REST v2 access: subscriber sync, account deletion, and the webhook's entitlement refresh (needs read access to customers and entitlements) |
+| `ENFORCE_ENTITLEMENTS` | `true` makes Plaid (Suffice), restaurant menus (Sated) and creating/joining study groups (Hearken) answer `402 ENTITLEMENT_REQUIRED` without the app's plan or Hearth+; default `false` |
 | `EXPO_ACCESS_TOKEN` | BigTable push notifications through Expo |
 | `PORT` | Local server port; default 3000 |
 

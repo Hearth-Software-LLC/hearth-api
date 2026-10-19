@@ -8,6 +8,7 @@ import { createFromTableMap } from "./helpers/supabase.js";
 const verifyRevenueCatAuthorizationHeader = vi.fn();
 const extractRevenueCatEvent = vi.fn();
 const deriveTierFromRevenueCat = vi.fn();
+const fetchRevenueCatEntitlements = vi.fn();
 
 const fromMock = vi.fn();
 const supabaseAdmin = {
@@ -18,6 +19,10 @@ vi.mock("../../src/bigtable/lib/revenuecat.js", () => ({
   verifyRevenueCatAuthorizationHeader,
   extractRevenueCatEvent,
   deriveTierFromRevenueCat,
+}));
+
+vi.mock("../../src/bigtable/lib/revenuecat-entitlements.js", () => ({
+  fetchRevenueCatEntitlements,
 }));
 
 vi.mock("../../src/bigtable/lib/supabase.js", () => ({
@@ -75,16 +80,17 @@ describe("POST /api/webhooks/revenuecat", () => {
 
     expect(response.status).toBe(200);
     assertWebhookDuplicateResponse(payload);
-    expect(deriveTierFromRevenueCat).not.toHaveBeenCalled();
+    expect(fetchRevenueCatEntitlements).not.toHaveBeenCalled();
     expect(duplicateInsert).not.toHaveBeenCalled();
   });
 
-  it("projects tier and logs event", async () => {
+  it("refreshes entitlements, projects tier and logs event", async () => {
     verifyRevenueCatAuthorizationHeader.mockReturnValue(true);
     extractRevenueCatEvent.mockReturnValue(
       revenueCatEventFixture({ id: "evt_2", app_user_id: "user-2" })
     );
-    deriveTierFromRevenueCat.mockReturnValue("pro");
+    fetchRevenueCatEntitlements.mockResolvedValue({ "bigtable_plus": "2099-06-01T00:00:00.000Z" });
+    const upsert = vi.fn(async (_row: Record<string, unknown>) => ({ error: null }));
 
     fromMock.mockImplementation((table: string) => {
       if (table === "revenuecat_webhook_events") {
@@ -110,7 +116,7 @@ describe("POST /api/webhooks/revenuecat", () => {
 
       if (table === "subscriptions") {
         return {
-          upsert: vi.fn(async () => ({ error: null })),
+          upsert,
         };
       }
 
@@ -121,6 +127,11 @@ describe("POST /api/webhooks/revenuecat", () => {
     const response = await POST(requestOf({ event: { id: "evt_2" } }) as never);
 
     expect(response.status).toBe(200);
-    expect(deriveTierFromRevenueCat).toHaveBeenCalledTimes(1);
+    expect(fetchRevenueCatEntitlements).toHaveBeenCalledWith("user-2");
+    expect(upsert.mock.calls[0]?.[0]).toMatchObject({
+      profile_id: "user-2",
+      tier: "pro",
+      entitlements: { "bigtable_plus": "2099-06-01T00:00:00.000Z" },
+    });
   });
 });

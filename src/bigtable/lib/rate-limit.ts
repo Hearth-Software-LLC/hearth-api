@@ -1,3 +1,4 @@
+import { householdOrganizerOf, subscriptionGrantsPro } from "./entitlements.js";
 import { supabaseAdmin } from "./supabase.js";
 
 type AiUsageRow = {
@@ -38,10 +39,12 @@ export function nextMonthStartUTC(date = new Date()): string {
   return next.toISOString();
 }
 
-async function getOrCreateSubscriptionTier(profileId: string): Promise<SubscriptionTier> {
+type SubscriptionRow = { tier?: unknown; entitlements?: unknown; expires_at?: unknown };
+
+async function getOrCreateSubscription(profileId: string): Promise<SubscriptionRow> {
   const { data, error } = await supabaseAdmin
     .from("subscriptions")
-    .select("tier")
+    .select("tier, entitlements, expires_at")
     .eq("profile_id", profileId)
     .maybeSingle();
 
@@ -49,9 +52,8 @@ async function getOrCreateSubscriptionTier(profileId: string): Promise<Subscript
     throw new Error(error.message);
   }
 
-  const tier = normalizeSubscriptionTier(data?.tier);
   if (data?.tier) {
-    return tier;
+    return data as SubscriptionRow;
   }
 
   const { error: insertError } = await supabaseAdmin.from("subscriptions").insert({
@@ -64,7 +66,7 @@ async function getOrCreateSubscriptionTier(profileId: string): Promise<Subscript
     throw new Error(insertError.message);
   }
 
-  return "free";
+  return { tier: "free" };
 }
 
 async function getUsage(profileId: string, key: string): Promise<AiUsageRow | null> {
@@ -83,34 +85,28 @@ async function getUsage(profileId: string, key: string): Promise<AiUsageRow | nu
 }
 
 /**
- * The tier that applies to someone: their own, or their household organizer's when that's
- * better. Families share the organizer's subscription (joined with the household join code),
- * with no limit on how many people.
+ * The tier that applies to someone: Pro when their own subscription or their household
+ * organizer's grants it (a paid tier, BigTable Plus or Hearth+). Families share the organizer's
+ * subscription (joined with the household join code), with no limit on how many people.
  */
 async function effectiveTier(profileId: string): Promise<SubscriptionTier> {
-  const own = await getOrCreateSubscriptionTier(profileId);
-  if (own !== "free") {
-    return own;
+  const own = await getOrCreateSubscription(profileId);
+  if (subscriptionGrantsPro(own) || normalizeSubscriptionTier(own.tier) !== "free") {
+    return "pro";
   }
-  const { data, error } = await supabaseAdmin
-    .from("household_memberships")
-    .select("organizer_id")
-    .eq("member_id", profileId)
-    .maybeSingle();
-  const organizerId = !error && typeof data?.organizer_id === "string" ? data.organizer_id : null;
-  if (!organizerId || organizerId === profileId) {
-    return own;
+  const organizerId = await householdOrganizerOf(profileId);
+  if (!organizerId) {
+    return "free";
   }
   const organizer = await supabaseAdmin
     .from("subscriptions")
-    .select("tier")
+    .select("tier, entitlements, expires_at")
     .eq("profile_id", organizerId)
     .maybeSingle();
   if (organizer.error) {
-    return own;
+    return "free";
   }
-  const organizerTier = normalizeSubscriptionTier(organizer.data?.tier);
-  return organizerTier !== "free" ? organizerTier : own;
+  return subscriptionGrantsPro(organizer.data as SubscriptionRow | null) ? "pro" : "free";
 }
 
 export async function getUsageStatus(profileId: string) {

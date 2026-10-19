@@ -14,12 +14,16 @@ import {
 import type { ConnectionStore } from '../../services/connections.js';
 import type { TokenSeal } from '../../services/token-seal.js';
 import type { ReserveQuota } from '../../services/quota.js';
+import { allowAll } from '../../services/entitlements.js';
+import type { EntitlementGate } from '../../services/entitlements.js';
 
 export type BankingDependencies = {
   linkClient: CreateLinkToken | undefined;
   dataClient: PlaidDataClient | undefined;
   store: ConnectionStore | undefined;
   seal: TokenSeal | undefined;
+  /** Checks Suffice access before linking a bank. Lets everyone through when not given. */
+  requireAccess?: EntitlementGate;
 };
 
 /** Pages of /transactions/sync per request. The app calls again while `hasMore` is true. */
@@ -39,9 +43,9 @@ const transactionSchema = z.object({
 }).openapi('BankTransaction');
 const connectionSchema = z.object({ itemId: z.string(), institution: z.string(), createdAt: z.string() }).openapi('BankConnection');
 
-const errors = (...codes: (400 | 401 | 403 | 404 | 409 | 429 | 502 | 503 | 504)[]) => Object.fromEntries(codes.map((code) => [
+const errors = (...codes: (400 | 401 | 402 | 403 | 404 | 409 | 429 | 502 | 503 | 504)[]) => Object.fromEntries(codes.map((code) => [
   code, { description: {
-    400: 'Invalid request', 401: 'Invalid or missing token', 403: 'A durable signed-in identity is required',
+    400: 'Invalid request', 401: 'Invalid or missing token', 402: 'Needs Suffice Plus or Hearth+ (only when ENFORCE_ENTITLEMENTS is on)', 403: 'A durable signed-in identity is required',
     404: 'Connection not found', 409: 'The bank needs the person to sign in again (use update mode)',
     429: 'User quota exceeded', 502: 'Plaid failed or returned invalid data',
     503: 'Required service unavailable or provider quota exhausted', 504: 'Plaid timed out',
@@ -67,6 +71,7 @@ export function registerBanking(
   dependencies: BankingDependencies,
 ) {
   const { linkClient, dataClient, store, seal } = dependencies;
+  const requireAccess = dependencies.requireAccess ?? allowAll;
 
   app.use('/v1/banking/*', async (context, next) => {
     if (context.get('isAnonymous')) {
@@ -111,9 +116,10 @@ export function registerBanking(
           linkToken: z.string(), expiresAt: z.iso.datetime({ offset: true }), plaidRequestId: z.string(),
         }).openapi('PlaidLinkToken') } },
       },
-      ...errors(400, 401, 403, 404, 429, 502, 503, 504),
+      ...errors(400, 401, 402, 403, 404, 429, 502, 503, 504),
     },
   }), async (context) => {
+    await requireAccess(context.get('userId'), 'suffice');
     if (!linkClient || !config.PLAID_CLIENT_ID || !config.PLAID_SECRET || !config.PLAID_PRODUCTS) {
       throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', 'Plaid is not configured');
     }
@@ -145,9 +151,10 @@ export function registerBanking(
           itemId: z.string(), institution: z.string(), institutionDomain: z.string().nullable(), accounts: z.array(accountSchema),
         }).openapi('NewBankConnection') } },
       },
-      ...errors(400, 401, 403, 429, 502, 503, 504),
+      ...errors(400, 401, 402, 403, 429, 502, 503, 504),
     },
   }), async (context) => {
+    await requireAccess(context.get('userId'), 'suffice');
     const { dataClient, store, seal } = connected();
     const { publicToken } = context.req.valid('json');
     const userId = context.get('userId');

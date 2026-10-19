@@ -5,6 +5,8 @@ import type { ApiEnvironment } from '../../contracts/common.js';
 import { ApiError } from '../../errors.js';
 import type { ReserveQuota } from '../../services/quota.js';
 import type { RestaurantService } from '../../services/restaurants.js';
+import { allowAll, requireApp } from '../../services/entitlements.js';
+import type { EntitlementGate } from '../../services/entitlements.js';
 
 // A place's name as a map shows it: printable text, no control characters.
 const placeName = z.string().trim().min(1).max(120).regex(/^[^\u0000-\u001f\u007f]+$/);
@@ -47,6 +49,7 @@ const lookupSchema = z.object({
 const errors = {
   400: { description: 'Invalid parameters', content: { 'application/json': { schema: errorSchema } } },
   401: { description: 'Invalid or missing token', content: { 'application/json': { schema: errorSchema } } },
+  402: { description: 'Needs Sated Plus or Hearth+ (only when ENFORCE_ENTITLEMENTS is on)', content: { 'application/json': { schema: errorSchema } } },
   429: { description: 'User quota exceeded', content: { 'application/json': { schema: errorSchema } } },
   502: { description: 'Provider failed or returned invalid data', content: { 'application/json': { schema: errorSchema } } },
   503: { description: 'Provider not configured, provider quota exhausted, or quota service unavailable', content: { 'application/json': { schema: errorSchema } } },
@@ -57,7 +60,11 @@ export function registerRestaurants(
   app: OpenAPIHono<ApiEnvironment>,
   service: RestaurantService | undefined,
   reserveQuota: ReserveQuota,
+  requireAccess: EntitlementGate = allowAll,
 ) {
+  // Restaurant menus are a Sated feature the server pays for.
+  app.use('/v1/restaurants/*', requireApp(requireAccess, 'sated'));
+
   const available = () => {
     if (!service) throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', 'Restaurant data provider is not configured');
     return service;

@@ -64,6 +64,11 @@ const configSchema = z.object({
   CRON_SECRET: z.string().trim().min(16).optional(),
   // Where links the API hands out point (study group invites).
   PUBLIC_BASE_URL: httpsUrl.default('https://api.hearthapps.com'),
+  // When true, server-paid features need the app's plan or Hearth+ (402 ENTITLEMENT_REQUIRED
+  // otherwise): Plaid (Suffice), restaurant menus (Sated), creating and joining study groups
+  // (Hearken). Off until the apps that sell those plans ship.
+  ENFORCE_ENTITLEMENTS: z.enum(['true', 'false', '1', '0']).default('false')
+    .transform((value) => value === 'true' || value === '1'),
 }).superRefine((config, context) => {
   for (const group of [
     ['AUTH_ISSUER', 'AUTH_AUDIENCE', 'AUTH_JWKS_URL'] as const,

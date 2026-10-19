@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "../next-shim.js";
 
-import {
-  deriveTierFromRevenueCat,
-  extractRevenueCatEvent,
-  verifyRevenueCatAuthorizationHeader,
-} from "../lib/revenuecat.js";
+import { applyEventToEntitlements, parseEntitlementMap, tierFromEntitlements } from "../lib/entitlements.js";
+import type { EntitlementMap } from "../lib/entitlements.js";
+import { extractRevenueCatEvent, verifyRevenueCatAuthorizationHeader } from "../lib/revenuecat.js";
+import { fetchRevenueCatEntitlements } from "../lib/revenuecat-entitlements.js";
 import { supabaseAdmin } from "../lib/supabase.js";
 import { serverError } from "../lib/server-error.js";
 
@@ -92,12 +91,37 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true, ignored: true }, { status: 202 });
   }
 
-  const projectedTier = deriveTierFromRevenueCat(event);
+  // Refresh the customer's whole entitlement set from RevenueCat. If its API can't be reached,
+  // apply this event to what's stored instead.
+  let entitlements: EntitlementMap;
+  try {
+    entitlements = await fetchRevenueCatEntitlements(event.app_user_id);
+  } catch (refreshError) {
+    console.warn(
+      "POST /api/webhooks/revenuecat entitlement refresh failed; applying the event instead",
+      refreshError instanceof Error ? refreshError.message : refreshError
+    );
+    const stored = await supabaseAdmin
+      .from("subscriptions")
+      .select("entitlements")
+      .eq("profile_id", profileLookup.data.id)
+      .maybeSingle();
+    if (stored.error) {
+      return serverError(
+        "POST /api/webhooks/revenuecat stored entitlements lookup failed",
+        "Failed to process webhook",
+        stored.error
+      );
+    }
+    entitlements = applyEventToEntitlements(parseEntitlementMap(stored.data?.entitlements), event);
+  }
 
   const subscriptionUpsert = await supabaseAdmin.from("subscriptions").upsert(
     {
       profile_id: profileLookup.data.id,
-      tier: projectedTier,
+      // BigTable's AI limits read `tier`: Pro while BigTable Plus or Hearth+ is active.
+      tier: tierFromEntitlements(entitlements),
+      entitlements,
       revenuecat_user_id: event.app_user_id,
       expires_at: event.expires_at,
       updated_at: new Date().toISOString(),

@@ -7,6 +7,8 @@ import { errorSchema } from '../contracts/common.js';
 import type { ApiEnvironment } from '../contracts/common.js';
 import { ApiError } from '../errors.js';
 import type { HearkenService } from './service.js';
+import { allowAll } from '../services/entitlements.js';
+import type { EntitlementGate } from '../services/entitlements.js';
 
 // MARK: Schemas
 
@@ -136,7 +138,12 @@ const noContent = { 204: { description: 'Done' } };
 const route = <R extends Omit<RouteConfig, 'tags' | 'security'>>(config: R) =>
   createRoute({ ...config, tags: ['Hearken'], security: [{ BearerAuth: [] }] } as R & { tags: string[] });
 
-export type HearkenDependencies = { service: HearkenService | undefined };
+export type HearkenDependencies = {
+  service: HearkenService | undefined;
+  /** Checks Hearken access before creating or joining a group. Lets everyone through when not given. */
+  requireAccess?: EntitlementGate;
+};
+const needsPlan = { 402: json(errorSchema, 'Needs Hearken Plus or Hearth+ (only when ENFORCE_ENTITLEMENTS is on)') };
 
 export function registerHearken(app: OpenAPIHono<ApiEnvironment>, config: Config, dependencies: HearkenDependencies) {
   const service = () => {
@@ -166,6 +173,7 @@ export function registerHearken(app: OpenAPIHono<ApiEnvironment>, config: Config
   });
 
   const me = (context: { get: (key: 'userId') => string }) => context.get('userId');
+  const requireAccess = dependencies.requireAccess ?? allowAll;
 
   // MARK: Groups
 
@@ -177,8 +185,11 @@ export function registerHearken(app: OpenAPIHono<ApiEnvironment>, config: Config
   app.openapi(route({
     method: 'post', path: '/v1/hearken/groups', summary: 'Create a group. Repeating a clientId returns the same group',
     request: body(createGroupBody),
-    responses: { 201: json(groupSchema, 'The new group'), ...errors },
-  }), async (context) => context.json(await service().createGroup(me(context), context.req.valid('json')), 201));
+    responses: { 201: json(groupSchema, 'The new group'), ...errors, ...needsPlan },
+  }), async (context) => {
+    await requireAccess(me(context), 'hearken');
+    return context.json(await service().createGroup(me(context), context.req.valid('json')), 201);
+  });
 
   app.openapi(route({
     method: 'post', path: '/v1/hearken/groups/import', summary: 'Move a CloudKit group to the server (owner’s device)',
@@ -236,10 +247,11 @@ export function registerHearken(app: OpenAPIHono<ApiEnvironment>, config: Config
   app.openapi(route({
     method: 'post', path: '/v1/hearken/invites/{code}/join', summary: 'Join with an invite code',
     request: { params: codeParams, ...body(joinBody) },
-    responses: { 200: json(groupSchema, 'The group'), ...errors },
-  }), async (context) => context.json(
-    await service().join(me(context), context.req.valid('param').code, context.req.valid('json')), 200,
-  ));
+    responses: { 200: json(groupSchema, 'The group'), ...errors, ...needsPlan },
+  }), async (context) => {
+    await requireAccess(me(context), 'hearken');
+    return context.json(await service().join(me(context), context.req.valid('param').code, context.req.valid('json')), 200);
+  });
 
   app.openapi(route({
     method: 'delete', path: '/v1/hearken/groups/{groupId}/members/{userId}',

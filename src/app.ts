@@ -32,6 +32,9 @@ import { createHearkenService } from './hearken/service.js';
 import type { HearkenService } from './hearken/service.js';
 import { createDatabase } from './hearken/db.js';
 import { createApnsSender } from './integrations/apns.js';
+import { appAccess, effectiveEntitlements } from './bigtable/lib/entitlements.js';
+import { createEntitlementGate, loadEntitlements } from './services/entitlements.js';
+import type { EntitlementSource } from './services/entitlements.js';
 
 export type AppOptions = {
   config?: Config;
@@ -46,6 +49,8 @@ export type AppOptions = {
   cache?: Cache;
   /** Hearken study groups. Built from DATABASE_URL and the APNS_* settings when not given. */
   hearken?: HearkenService;
+  /** The caller's active entitlements (own plus household organizer's). Read from Supabase when not given. */
+  entitlements?: EntitlementSource;
 };
 
 type RequestLog = {
@@ -152,20 +157,59 @@ export function createApp(options: AppOptions = {}) {
     },
   }), (context) => context.json({ id: context.get('userId') }, 200));
 
+  const entitlementSource = options.entitlements
+    ?? (config.SUPABASE_URL && config.SUPABASE_SECRET_KEY ? (userId: string) => effectiveEntitlements(userId) : undefined);
+  const entitlementGate = createEntitlementGate(config.ENFORCE_ENTITLEMENTS, entitlementSource);
+
+  app.openapi(createRoute({
+    method: 'get',
+    path: '/v1/me/entitlements',
+    tags: ['Identity'],
+    summary: 'The caller\'s active plans: their own and their household organizer\'s',
+    description: 'Each entitlement is a RevenueCat lookup key (`hearth_plus`, `bigtable_plus`, `suffice_plus`, `sated_plus`, `caloma_plus`, `hearken_plus`) with its expiry (null = never). `apps` says which apps are unlocked: the app\'s own entitlement or Hearth+.',
+    security: [{ BearerAuth: [] }],
+    responses: {
+      200: {
+        description: 'Active entitlements',
+        content: { 'application/json': { schema: z.object({
+          entitlements: z.array(z.object({
+            id: z.string(),
+            expiresAt: z.string().nullable(),
+            source: z.enum(['own', 'household']),
+          }).openapi('Entitlement')),
+          hearthPlus: z.boolean(),
+          apps: z.object({
+            bigtable: z.boolean(), suffice: z.boolean(), sated: z.boolean(), caloma: z.boolean(), hearken: z.boolean(),
+          }),
+        }).openapi('Entitlements') } },
+      },
+      401: { description: 'Invalid or missing token', content: { 'application/json': { schema: errorSchema } } },
+      503: { description: 'Subscriptions unavailable', content: { 'application/json': { schema: errorSchema } } },
+    },
+  }), async (context) => {
+    const entitlements = await loadEntitlements(entitlementSource, context.get('userId'));
+    return context.json({
+      entitlements: entitlements.map(({ id, expiresAt, source }) => ({ id, expiresAt, source })),
+      hearthPlus: entitlements.some((entry) => entry.id === 'hearth_plus'),
+      apps: appAccess(entitlements),
+    }, 200);
+  });
+
   const reserveQuota = options.reserveQuota ?? createQuota(config);
   registerBrands(app, config, reserveQuota);
   registerFoods(app, config, reserveQuota, options.fetcher ?? fetch);
   const cache = options.cache ?? createCache(config);
   const fatSecret = createFatSecret(config, cache, options.fetcher ?? fetch);
-  registerRestaurants(app, fatSecret && createRestaurantService(fatSecret, cache, config.RESTAURANT_CACHE_HOURS), reserveQuota);
+  registerRestaurants(app, fatSecret && createRestaurantService(fatSecret, cache, config.RESTAURANT_CACHE_HOURS), reserveQuota, entitlementGate);
   registerBanking(app, config, reserveQuota, {
     linkClient: options.plaidLinkClient ?? createPlaidLinkClient(config),
     dataClient: options.plaidDataClient ?? createPlaidDataClient(config),
     store: options.connectionStore ?? createConnectionStore(config, options.fetcher ?? fetch),
     seal: options.tokenSeal ?? (config.PLAID_TOKEN_KEY ? createTokenSeal(config.PLAID_TOKEN_KEY) : undefined),
+    requireAccess: entitlementGate,
   });
 
-  registerHearken(app, config, { service: options.hearken ?? createHearkenFromConfig(config) });
+  registerHearken(app, config, { service: options.hearken ?? createHearkenFromConfig(config), requireAccess: entitlementGate });
 
   registerBigTable(app, verifyToken);
   registerAppLinks(app, config);
