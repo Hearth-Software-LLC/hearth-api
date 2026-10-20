@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "../next-shim.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { getMembershipContext } from "../lib/household.js";
-import { insertNotification } from "../lib/notifications.js";
-import { deleteRevenueCatSubscriber, ensureRevenueCatSubscriber } from "../lib/revenuecat.js";
+import { ensureRevenueCatSubscriber } from "../lib/revenuecat.js";
 import { supabaseAdmin } from "../lib/supabase.js";
 import { serverError } from "../lib/server-error.js";
+import { ApiError } from "../../errors.js";
+import { AccountDeletionError, deleteHearthAccount } from "../../services/account-deletion.js";
 
 export const dynamic = "force-dynamic";
 
@@ -106,11 +107,6 @@ function badRequestResponse(message: string) {
 
 function conflictResponse(message: string) {
   return NextResponse.json({ error: message }, { status: 409 });
-}
-
-function displayNameFromProfile(profile: { household_name?: string | null } | null | undefined, fallback = "A member") {
-  const name = typeof profile?.household_name === "string" ? profile.household_name.trim() : "";
-  return name || fallback;
 }
 
 function isValidIsoDateOnly(value: string) {
@@ -747,132 +743,30 @@ export async function PUT(request: NextRequest) {
   });
 }
 
-async function deleteMemberAvatarObjects(profileId: string) {
-  const bucket = supabaseAdmin.storage.from("member-avatars");
-  const { data: listedObjects, error: listError } = await bucket.list(profileId, {
-    limit: 1000,
-    sortBy: { column: "name", order: "asc" },
-  });
-
-  if (listError) {
-    throw listError;
-  }
-
-  const objectPaths = (listedObjects ?? [])
-    .filter((entry) => Boolean(entry.name))
-    .map((entry) => `${profileId}/${entry.name}`);
-
-  if (objectPaths.length === 0) {
-    return;
-  }
-
-  const { error: removeError } = await bucket.remove(objectPaths);
-  if (removeError) {
-    throw removeError;
-  }
-}
-
 export async function DELETE(request: NextRequest) {
   const userId = await getUserIdFromAuthHeader(request.headers.get("authorization"));
   if (!userId) {
     return unauthorizedResponse();
   }
 
-  const [managedMembersResult, membershipResult] = await Promise.all([
-    supabaseAdmin
-      .from("household_memberships")
-      .select("member_id")
-      .eq("organizer_id", userId)
-      .limit(1)
-      .maybeSingle(),
-    supabaseAdmin
-      .from("household_memberships")
-      .select("organizer_id")
-      .eq("member_id", userId)
-      .maybeSingle(),
-  ]);
-
-  if (managedMembersResult.error || membershipResult.error) {
-    return serverError(
-      "DELETE /api/me membership checks failed",
-      "Failed to delete account",
-      managedMembersResult.error ?? membershipResult.error
-    );
-  }
-
-  if (managedMembersResult.data) {
-    return conflictResponse("Remove all household members before deleting your account");
-  }
-
-  const subscriptionResult = await supabaseAdmin
-    .from("subscriptions")
-    .select("tier, revenuecat_user_id")
-    .eq("profile_id", userId)
-    .maybeSingle();
-
-  if (subscriptionResult.error) {
-    return serverError(
-      "DELETE /api/me subscription lookup failed",
-      "Failed to delete account",
-      subscriptionResult.error
-    );
-  }
-
-  const revenueCatUserId = subscriptionResult.data?.revenuecat_user_id?.trim() || userId;
-  const hasPaidTier = Boolean(subscriptionResult.data?.tier && subscriptionResult.data.tier !== "free");
-
-  if (hasPaidTier) {
-    try {
-      await deleteRevenueCatSubscriber(revenueCatUserId);
-    } catch (error) {
-      return serverError(
-        "DELETE /api/me revenuecat cancellation failed",
-        "Failed to cancel subscription during account deletion",
-        error
-      );
-    }
-  }
-
+  // The same deletion as DELETE /v1/me (services/account-deletion), so a BigTable account deletion
+  // also removes the person's Hearken data and Plaid connections. The RevenueCat customer is
+  // deleted only for a paid BigTable tier, as before.
+  let result;
   try {
-    // Best-effort storage cleanup before deleting the auth user.
-    await deleteMemberAvatarObjects(userId);
+    result = await deleteHearthAccount(userId, { revenueCat: "paid-tier" });
   } catch (error) {
-    return serverError(
-      "DELETE /api/me delete member avatars failed",
-      "Failed to delete account",
-      error
-    );
-  }
-
-  if (membershipResult.data?.organizer_id) {
-    const profileResult = await supabaseAdmin
-      .from("profiles")
-      .select("id, household_name")
-      .eq("id", userId)
-      .maybeSingle();
-
-    if (profileResult.error) {
-      return serverError(
-        "DELETE /api/me member profile lookup failed",
-        "Failed to delete account",
-        profileResult.error
-      );
+    if (error instanceof AccountDeletionError) {
+      return serverError(`DELETE /api/me ${error.step} failed`, error.message, error.failure);
     }
-
-    await insertNotification({
-      recipientProfileId: membershipResult.data.organizer_id,
-      type: "household_member_left",
-      actorProfileId: userId,
-      data: {
-        memberProfileId: userId,
-        memberName: displayNameFromProfile(profileResult.data, "A member"),
-      },
-    });
+    if (error instanceof ApiError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
+    return serverError("DELETE /api/me failed", "Failed to delete account", error);
   }
 
-  const { error: deleteUserError } = await supabaseAdmin.auth.admin.deleteUser(userId);
-  if (deleteUserError) {
-    return serverError("DELETE /api/me delete user failed", "Failed to delete account", deleteUserError);
+  if (result === "household_has_members") {
+    return conflictResponse("Remove all household members before deleting your account");
   }
 
   return NextResponse.json({ ok: true });

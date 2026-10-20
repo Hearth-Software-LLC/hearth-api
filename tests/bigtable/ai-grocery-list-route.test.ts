@@ -99,7 +99,11 @@ function createTableMock(table: string, withMeals: boolean) {
   if (table === "household_members") {
     return {
       select: vi.fn(() => ({
-        eq: vi.fn(async () => ({ data: household.memberNames.map((name) => ({ name })), error: null })),
+        // Rows carry names too, so the tests prove the AI context never uses them.
+        eq: vi.fn(async () => ({
+          data: household.memberNames.map((name, index) => ({ name, date_of_birth: index === 0 ? "2018-01-01" : null, likes: [], dislikes: [] })),
+          error: null,
+        })),
       })),
     };
   }
@@ -240,6 +244,30 @@ describe("POST /api/ai/grocery-list", () => {
     expect(response.status).toBe(200);
     expect(body).toHaveProperty("groceryList");
     expect(body.generatedBy).toBe("fallback");
+  });
+
+  it("sends the stored household without member or household names", async () => {
+    fromMock.mockImplementation((table: string) => createTableMock(table, true));
+    getUserIdFromAuthHeader.mockResolvedValue("user-1");
+    getUsageStatus.mockResolvedValue(usageFixture({ requestsUsed: 2, requestsLimit: 120 }));
+    buildGroceryList.mockResolvedValue({
+      source: "fallback",
+      groceryList: [{ section: "Produce", items: [{ id: "item-1", name: "Spinach", quantity: "2 bags" }] }],
+    });
+
+    const { POST } = await import("../../src/bigtable/routes/ai.grocery-list.js");
+    const response = await POST(
+      buildAuthenticatedJsonRequest("http://localhost/api/ai/grocery-list", { weekStart: "2026-05-24" }) as never
+    );
+
+    expect(response.status).toBe(200);
+    const args = buildGroceryList.mock.calls[0]?.[0] as { householdMembers: string[]; restrictions: string[]; householdName: string | null };
+    expect(args.householdName).toBeNull();
+    expect(args.householdMembers).toEqual([expect.stringMatching(/^Kid, \d+$/), "Adult"]);
+    expect(args.restrictions).toEqual(householdFixture().restrictions);
+    const sent = JSON.stringify(args);
+    for (const name of householdFixture().memberNames) expect(sent).not.toContain(name);
+    expect(sent).not.toContain(householdFixture().householdName);
   });
 
   it("uses the Hearth household from the request, with allergies as hard rules", async () => {

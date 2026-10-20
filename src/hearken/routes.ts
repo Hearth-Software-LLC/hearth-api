@@ -1,4 +1,3 @@
-import { timingSafeEqual } from 'node:crypto';
 import { createRoute, z } from '@hono/zod-openapi';
 import type { OpenAPIHono, RouteConfig } from '@hono/zod-openapi';
 import { bodyLimit } from 'hono/body-limit';
@@ -6,6 +5,7 @@ import type { Config } from '../config.js';
 import { errorSchema } from '../contracts/common.js';
 import type { ApiEnvironment } from '../contracts/common.js';
 import { ApiError } from '../errors.js';
+import { requireCronSecret } from '../middleware/cron.js';
 import type { HearkenService } from './service.js';
 import { allowAll } from '../services/entitlements.js';
 import type { EntitlementGate } from '../services/entitlements.js';
@@ -155,9 +155,10 @@ export function registerHearken(app: OpenAPIHono<ApiEnvironment>, config: Config
     if (context.get('isAnonymous')) {
       throw new ApiError(403, 'REGISTERED_IDENTITY_REQUIRED', 'Sign in with Apple to use study groups');
     }
-    // Every write carries a JSON body, except reactions (PUT with nothing to send).
+    // Every write carries a JSON body, except reactions and blocks (PUT with nothing to send).
     const hasBody = ['POST', 'PATCH'].includes(context.req.method)
-      || (context.req.method === 'PUT' && !context.req.path.includes('/reactions/'));
+      || (context.req.method === 'PUT' && !context.req.path.includes('/reactions/')
+        && !context.req.path.startsWith('/v1/hearken/blocks/'));
     if (hasBody && !context.req.path.endsWith('/invite-code')
       && context.req.header('Content-Type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') {
       throw new ApiError(400, 'INVALID_REQUEST', 'An application/json body is required');
@@ -425,6 +426,34 @@ export function registerHearken(app: OpenAPIHono<ApiEnvironment>, config: Config
     return context.body(null, 204);
   });
 
+  // MARK: Blocking
+
+  const blockParams = z.object({ userID: uuid.openapi({ param: { name: 'userID', in: 'path' } }) });
+
+  app.openapi(route({
+    method: 'get', path: '/v1/hearken/blocks', summary: 'The people you have blocked',
+    responses: { 200: json(z.object({ userIDs: z.array(z.string()) }).openapi('HearkenBlocks'), 'Blocked people, oldest first'), ...errors },
+  }), async (context) => context.json({ userIDs: await service().listBlocks(me(context)) }, 200));
+
+  app.openapi(route({
+    method: 'put', path: '/v1/hearken/blocks/{userID}',
+    summary: 'Block someone: their posts, replies and answers are left out of what you read. Blocking yourself is a 400',
+    request: { params: blockParams },
+    responses: { ...noContent, ...errors },
+  }), async (context) => {
+    await service().block(me(context), context.req.valid('param').userID);
+    return context.body(null, 204);
+  });
+
+  app.openapi(route({
+    method: 'delete', path: '/v1/hearken/blocks/{userID}', summary: 'Unblock someone',
+    request: { params: blockParams },
+    responses: { ...noContent, ...errors },
+  }), async (context) => {
+    await service().unblock(me(context), context.req.valid('param').userID);
+    return context.body(null, 204);
+  });
+
   // MARK: Account and devices
 
   app.openapi(route({
@@ -449,11 +478,7 @@ export function registerHearken(app: OpenAPIHono<ApiEnvironment>, config: Config
   // MARK: Scheduled jobs (Vercel Cron), outside /v1 so no user token is needed
 
   app.get('/internal/hearken/cron', async (context) => {
-    const expected = config.CRON_SECRET;
-    const given = context.req.header('Authorization') ?? '';
-    const valid = expected !== undefined && given.length === expected.length + 7
-      && timingSafeEqual(Buffer.from(given), Buffer.from(`Bearer ${expected}`));
-    if (!valid) throw new ApiError(401, 'UNAUTHORIZED', 'A valid bearer token is required');
+    requireCronSecret(config, context.req.header('Authorization'));
     return context.json(await service().runScheduled(), 200);
   });
 

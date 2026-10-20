@@ -20,6 +20,17 @@ export class RecipeScanError extends Error {
   }
 }
 
+/** Anthropic's error type from a failed response ("invalid_request_error"), or "unknown". Never the message. */
+async function upstreamErrorCode(response: Response): Promise<string> {
+  try {
+    const body = (await response.json()) as { error?: { type?: unknown } } | null;
+    const type = body?.error?.type;
+    return typeof type === "string" && /^[a-z_]{1,64}$/.test(type) ? type : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 function extractJsonObject(text: string): string | null {
   const fenced = text.match(/```json\s*([\s\S]*?)```/i);
   if (fenced?.[1]) {
@@ -132,10 +143,9 @@ export async function scanRecipeDocumentImage(input: {
   }
 
   if (!response.ok) {
-    // Surface the upstream error body in logs so image-payload rejections
-    // (oversized/invalid image, unsupported media type) are diagnosable.
-    const upstreamBody = await response.text().catch(() => "");
-    console.error("Recipe scan upstream error", { status: response.status, body: upstreamBody.slice(0, 500) });
+    // Log the status and Anthropic's short error type (e.g. "invalid_request_error") so image
+    // rejections stay diagnosable, but never the body: it can quote the request back.
+    console.error("Recipe scan upstream error", { status: response.status, code: await upstreamErrorCode(response) });
     throw new RecipeScanError(
       `Recipe scan failed with upstream status ${response.status}`,
       "AI_UPSTREAM_ERROR",

@@ -4,6 +4,7 @@
   "installCommand": "npm ci --include=dev",
   "buildCommand": "npm run build",
   "crons": [
-    { "path": "/internal/hearken/cron", "schedule": "0 13 * * *" }
+    { "path": "/internal/hearken/cron", "schedule": "0 13 * * *" },
+    { "path": "/internal/bigtable/cron", "schedule": "17 4 * * *" }
   ]
 }

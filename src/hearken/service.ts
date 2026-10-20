@@ -298,19 +298,21 @@ export function createHearkenService(options: HearkenServiceOptions) {
     }));
   }
 
-  /** Comment count and latest comment per target. */
-  async function commentStats(db: Db, targetType: 'item' | 'answer', ids: string[], names: Map<string, string>) {
+  /** Comment count and latest comment per target, leaving out replies by people the reader blocked. */
+  async function commentStats(db: Db, targetType: 'item' | 'answer', ids: string[], names: Map<string, string>, blocked: string[] = []) {
     const stats = new Map<string, { count: number; latest: CommentView | null }>();
     if (ids.length === 0) return stats;
     const counts = await db<{ target_id: string; count: number }[]>`
       select target_id, count(*)::int as count from hk_comments
       where target_type = ${targetType} and target_id = any(${ids}::uuid[]) and deleted_at is null
+        and author_id <> all(${blocked}::uuid[])
       group by target_id`;
     const latest = await db<CommentRow[]>`
       select distinct on (target_id) id, group_id, target_type, target_id, parent_id, author_id, author_name, body, mentions,
              mentions_everyone, created_at
       from hk_comments
       where target_type = ${targetType} and target_id = any(${ids}::uuid[]) and deleted_at is null
+        and author_id <> all(${blocked}::uuid[])
       order by target_id, created_at desc`;
     const latestViews = await commentViews(db, latest, names);
     for (const row of counts) stats.set(row.target_id, { count: row.count, latest: null });
@@ -322,9 +324,9 @@ export function createHearkenService(options: HearkenServiceOptions) {
     return stats;
   }
 
-  async function itemViews(db: Db, rows: ItemRow[], names: Map<string, string>) {
+  async function itemViews(db: Db, rows: ItemRow[], names: Map<string, string>, blocked: string[] = []) {
     const ids = rows.map((row) => row.id);
-    const [reactions, stats] = await Promise.all([reactionsFor(db, 'item', ids), commentStats(db, 'item', ids, names)]);
+    const [reactions, stats] = await Promise.all([reactionsFor(db, 'item', ids), commentStats(db, 'item', ids, names, blocked)]);
     return rows.map((row): ItemView => {
       const authorId = row.author_id ?? legacyKey(row.legacy_author_id ?? '');
       return {
@@ -346,14 +348,16 @@ export function createHearkenService(options: HearkenServiceOptions) {
     });
   }
 
-  async function questionViews(db: Db, me: string, rows: QuestionRow[], names: Map<string, string>) {
+  async function questionViews(db: Db, me: string, rows: QuestionRow[], names: Map<string, string>, blocked: string[] = []) {
     if (rows.length === 0) return [];
     const answers = await db<AnswerRow[]>`
       select id, question_id, group_id, user_id, author_name, body, created_at, updated_at from hk_answers
-      where question_id = any(${rows.map((row) => row.id)}::uuid[])
+      where question_id = any(${rows.map((row) => row.id)}::uuid[]) and user_id <> all(${blocked}::uuid[])
       order by created_at`;
     const answerIds = answers.map((row) => row.id);
-    const [reactions, stats] = await Promise.all([reactionsFor(db, 'answer', answerIds), commentStats(db, 'answer', answerIds, names)]);
+    const [reactions, stats] = await Promise.all([
+      reactionsFor(db, 'answer', answerIds), commentStats(db, 'answer', answerIds, names, blocked),
+    ]);
     const at = now();
     return rows.map((row): QuestionView => {
       const own = answers.filter((answer) => answer.question_id === row.id);
@@ -404,10 +408,17 @@ export function createHearkenService(options: HearkenServiceOptions) {
     return names;
   }
 
+  /** The people the caller has blocked: their posts, replies and answers are left out of what the caller reads. */
+  async function blockedBy(db: Db, me: string) {
+    const rows = await db<{ blocked_id: string }[]>`select blocked_id from hk_blocks where blocker_id = ${me}`;
+    return rows.map((row) => row.blocked_id);
+  }
+
   async function buildViews(db: Db, me: string, groups: GroupRow[]): Promise<GroupView[]> {
     if (groups.length === 0) return [];
     const ids = groups.map((group) => group.id);
     const at = now();
+    const blocked = await blockedBy(db, me);
     const [members, legacy, items, current, scheduled, names] = await Promise.all([
       db<MemberRow[]>`
         select m.group_id, m.user_id, m.role, m.display_name, m.initials, m.notify, m.joined_at,
@@ -425,6 +436,7 @@ export function createHearkenService(options: HearkenServiceOptions) {
         from (
           select i.*, row_number() over (partition by i.group_id order by i.created_at desc) as position
           from hk_items i where i.group_id = any(${ids}::uuid[]) and i.deleted_at is null
+            and (i.author_id is null or i.author_id <> all(${blocked}::uuid[]))
         ) ranked
         where position <= ${LIMITS.itemsPerPage}
         order by created_at desc`,
@@ -443,9 +455,9 @@ export function createHearkenService(options: HearkenServiceOptions) {
       memberNames(db, ids),
     ]);
     const [itemList, currentViews, scheduledViews] = await Promise.all([
-      itemViews(db, items, names),
-      questionViews(db, me, current, names),
-      questionViews(db, me, scheduled, names),
+      itemViews(db, items, names, blocked),
+      questionViews(db, me, current, names, blocked),
+      questionViews(db, me, scheduled, names, blocked),
     ]);
 
     // A question that reached its post time between cron runs: whoever looks first sends its notification.
@@ -833,12 +845,14 @@ export function createHearkenService(options: HearkenServiceOptions) {
 
   async function listItems(me: string, groupId: string, before?: string) {
     await membership(sql, groupId, me);
+    const blocked = await blockedBy(sql, me);
     const rows = await sql<ItemRow[]>`
       select id, group_id, author_id, legacy_author_id, author_name, kind, chapter_id, start_verse, end_verse, text, note, reference, created_at
       from hk_items
       where group_id = ${groupId} and deleted_at is null and created_at < ${before ? new Date(before) : now()}
+        and (author_id is null or author_id <> all(${blocked}::uuid[]))
       order by created_at desc limit ${LIMITS.itemsPerPage}`;
-    return itemViews(sql, rows, await memberNames(sql, [groupId]));
+    return itemViews(sql, rows, await memberNames(sql, [groupId]), blocked);
   }
 
   async function createItem(me: string, groupId: string, input: ItemInput) {
@@ -921,10 +935,12 @@ export function createHearkenService(options: HearkenServiceOptions) {
     await membership(sql, groupId, me);
     if (!(await targetExists(sql, groupId, targetType, targetId))) throw new ApiError(404, 'TARGET_NOT_FOUND', 'That post no longer exists');
     if (targetType === 'answer') await requireVisibleAnswer(me, targetId);
+    const blocked = await blockedBy(sql, me);
     const rows = await sql<CommentRow[]>`
       select id, group_id, target_type, target_id, parent_id, author_id, author_name, body, mentions, mentions_everyone, created_at
       from hk_comments
       where target_type = ${targetType} and target_id = ${targetId} and deleted_at is null
+        and author_id <> all(${blocked}::uuid[])
       order by created_at limit ${LIMITS.commentsPerTarget}`;
     return commentViews(sql, rows, await memberNames(sql, [groupId]));
   }
@@ -1030,7 +1046,7 @@ export function createHearkenService(options: HearkenServiceOptions) {
     const rows = await db<QuestionRow[]>`
       select id, group_id, author_id, author_name, text, reference, chapter_id, post_at, closes_at, hide_answers, notified_at from hk_questions where id = ${questionId} and group_id = ${groupId} and deleted_at is null`;
     if (rows.length === 0) throw new ApiError(404, 'QUESTION_NOT_FOUND', 'That question no longer exists');
-    const [result] = await questionViews(db, me, rows, await memberNames(db, [groupId]));
+    const [result] = await questionViews(db, me, rows, await memberNames(db, [groupId]), await blockedBy(db, me));
     return result!;
   }
 
@@ -1094,7 +1110,7 @@ export function createHearkenService(options: HearkenServiceOptions) {
       select id, group_id, author_id, author_name, text, reference, chapter_id, post_at, closes_at, hide_answers, notified_at from hk_questions
       where group_id = ${groupId} and deleted_at is null and post_at <= ${now()}
       order by post_at desc limit ${LIMITS.questionsListed}`;
-    return questionViews(sql, me, rows, await memberNames(sql, [groupId]));
+    return questionViews(sql, me, rows, await memberNames(sql, [groupId]), await blockedBy(sql, me));
   }
 
   async function answer(me: string, groupId: string, questionId: string, input: { body: string; authorName: string }) {
@@ -1233,8 +1249,26 @@ export function createHearkenService(options: HearkenServiceOptions) {
     return view(sql, me, groupId);
   }
 
+  // MARK: Blocking
+
+  async function listBlocks(me: string) {
+    const rows = await sql<{ blocked_id: string }[]>`
+      select blocked_id from hk_blocks where blocker_id = ${me} order by created_at`;
+    return rows.map((row) => row.blocked_id);
+  }
+
+  async function block(me: string, userId: string) {
+    if (userId.toLowerCase() === me.toLowerCase()) throw new ApiError(400, 'INVALID_REQUEST', 'You can’t block yourself');
+    await sql`insert into hk_blocks (blocker_id, blocked_id) values (${me}, ${userId}) on conflict do nothing`;
+  }
+
+  async function unblock(me: string, userId: string) {
+    await sql`delete from hk_blocks where blocker_id = ${me} and blocked_id = ${userId}`;
+  }
+
   // MARK: Account deletion
 
+  /** For DELETE /v1/hearken/me: hands groups on and removes what the person wrote (purged for good after 30 days). */
   async function deleteUser(me: string) {
     await sql.begin(async (tx) => {
       const groups = await tx<{ group_id: string }[]>`select group_id from hk_members where user_id = ${me}`;
@@ -1243,6 +1277,46 @@ export function createHearkenService(options: HearkenServiceOptions) {
       await tx`delete from hk_reactions where user_id = ${me}`;
       await tx`update hk_items set deleted_at = coalesce(deleted_at, now()), note = '', text = '' where author_id = ${me}`;
       await tx`update hk_comments set deleted_at = coalesce(deleted_at, now()) where author_id = ${me}`;
+      await tx`delete from hk_blocks where blocker_id = ${me} or blocked_id = ${me}`;
+      await tx`delete from hk_push_tokens where user_id = ${me}`;
+    });
+  }
+
+  /**
+   * For deleting the whole Hearth account (DELETE /v1/me): everything deleteUser does, but what the
+   * person wrote is deleted now instead of after 30 days: their posts, replies, answers, reactions
+   * and questions, with the replies and reactions that hang off them, and their blocks either way.
+   */
+  async function purgeUser(me: string) {
+    await sql.begin(async (tx) => {
+      const groups = await tx<{ group_id: string }[]>`select group_id from hk_members where user_id = ${me}`;
+      for (const { group_id } of groups) await departMember(tx, group_id, me);
+      // Answers go with the questions they answer, so note those before the questions go.
+      const questionAnswers = await tx<{ id: string }[]>`
+        select a.id from hk_answers a join hk_questions q on q.id = a.question_id where q.author_id = ${me}`;
+      const answers = await tx<{ id: string }[]>`delete from hk_answers where user_id = ${me} returning id`;
+      await tx`delete from hk_questions where author_id = ${me}`;
+      const items = await tx<{ id: string }[]>`delete from hk_items where author_id = ${me} returning id`;
+      const answerIds = [...questionAnswers, ...answers].map((row) => row.id);
+      const itemIds = items.map((row) => row.id);
+      // The person's replies and every reply on what's gone; replies to those go with them (two levels deep).
+      const comments = await tx<{ id: string }[]>`
+        with doomed as (
+          select id from hk_comments
+          where author_id = ${me}
+             or (target_type = 'item' and target_id = any(${itemIds}::uuid[]))
+             or (target_type = 'answer' and target_id = any(${answerIds}::uuid[]))
+        )
+        select id from hk_comments where id in (select id from doomed) or parent_id in (select id from doomed)`;
+      const commentIds = comments.map((row) => row.id);
+      await tx`
+        delete from hk_reactions
+        where user_id = ${me}
+           or (target_type = 'item' and target_id = any(${itemIds}::uuid[]))
+           or (target_type = 'answer' and target_id = any(${answerIds}::uuid[]))
+           or (target_type = 'comment' and target_id = any(${commentIds}::uuid[]))`;
+      await tx`delete from hk_comments where id = any(${commentIds}::uuid[])`;
+      await tx`delete from hk_blocks where blocker_id = ${me} or blocked_id = ${me}`;
       await tx`delete from hk_push_tokens where user_id = ${me}`;
     });
   }
@@ -1296,7 +1370,7 @@ export function createHearkenService(options: HearkenServiceOptions) {
     listGroups, getGroup, createGroup, updateGroup, deleteGroup, rotateInvite, previewInvite, join, removeMember, setRole,
     putProgress, setNotifications, listItems, createItem, deleteItem, react, listComments, createComment, deleteComment,
     createQuestion, updateQuestion, deleteQuestion, listQuestions, answer, deleteAnswer, registerPushToken, importGroup,
-    claimGroup, deleteUser, runScheduled,
+    claimGroup, listBlocks, block, unblock, deleteUser, purgeUser, runScheduled,
   };
 }
 

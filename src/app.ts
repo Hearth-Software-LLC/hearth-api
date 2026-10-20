@@ -35,6 +35,14 @@ import { createApnsSender } from './integrations/apns.js';
 import { appAccess, effectiveEntitlements } from './bigtable/lib/entitlements.js';
 import { createEntitlementGate, loadEntitlements } from './services/entitlements.js';
 import type { EntitlementSource } from './services/entitlements.js';
+import type { Sql } from 'postgres';
+import { createReportStore } from './services/reports.js';
+import type { ReportStore } from './services/reports.js';
+import { registerReports } from './routes/v1/reports.js';
+import { registerAccount } from './routes/v1/account.js';
+import { setAccountDeletionDependencies } from './services/account-deletion.js';
+import { requireCronSecret } from './middleware/cron.js';
+import { supabaseAdmin } from './bigtable/lib/supabase.js';
 
 export type AppOptions = {
   config?: Config;
@@ -51,6 +59,13 @@ export type AppOptions = {
   hearken?: HearkenService;
   /** The caller's active entitlements (own plus household organizer's). Read from Supabase when not given. */
   entitlements?: EntitlementSource;
+  /** Content reports (POST /v1/reports). Built from DATABASE_URL when not given. */
+  reports?: ReportStore;
+  /**
+   * Runs BigTable's 30-day purge of kitchens moved to iCloud and returns how many were purged.
+   * Calls `bigtable_purge_moved_kitchens()` with the Supabase secret key when not given.
+   */
+  purgeMovedKitchens?: () => Promise<number>;
 };
 
 type RequestLog = {
@@ -201,15 +216,36 @@ export function createApp(options: AppOptions = {}) {
   const cache = options.cache ?? createCache(config);
   const fatSecret = createFatSecret(config, cache, options.fetcher ?? fetch);
   registerRestaurants(app, fatSecret && createRestaurantService(fatSecret, cache, config.RESTAURANT_CACHE_HOURS), reserveQuota, entitlementGate);
+  const plaidDataClient = options.plaidDataClient ?? createPlaidDataClient(config);
+  const connectionStore = options.connectionStore ?? createConnectionStore(config, options.fetcher ?? fetch);
+  const tokenSeal = options.tokenSeal ?? (config.PLAID_TOKEN_KEY ? createTokenSeal(config.PLAID_TOKEN_KEY) : undefined);
   registerBanking(app, config, reserveQuota, {
     linkClient: options.plaidLinkClient ?? createPlaidLinkClient(config),
-    dataClient: options.plaidDataClient ?? createPlaidDataClient(config),
-    store: options.connectionStore ?? createConnectionStore(config, options.fetcher ?? fetch),
-    seal: options.tokenSeal ?? (config.PLAID_TOKEN_KEY ? createTokenSeal(config.PLAID_TOKEN_KEY) : undefined),
+    dataClient: plaidDataClient,
+    store: connectionStore,
+    seal: tokenSeal,
     requireAccess: entitlementGate,
   });
 
-  registerHearken(app, config, { service: options.hearken ?? createHearkenFromConfig(config), requireAccess: entitlementGate });
+  const hearken = options.hearken ?? createHearkenFromConfig(config);
+  registerHearken(app, config, { service: hearken, requireAccess: entitlementGate });
+
+  const database = databaseFromConfig(config);
+  const reports = options.reports ?? (database ? createReportStore(database) : undefined);
+  registerReports(app, reports);
+
+  // DELETE /v1/me and DELETE /v1/bigtable/me share one deletion, which needs these.
+  setAccountDeletionDependencies({ plaidClient: plaidDataClient, connections: connectionStore, seal: tokenSeal, hearken, reports });
+  registerAccount(app);
+
+  // BigTable's daily purge of kitchens moved to iCloud more than 30 days ago (Vercel Cron, like Hearken's).
+  const purgeMovedKitchens = options.purgeMovedKitchens
+    ?? (config.SUPABASE_URL && config.SUPABASE_SECRET_KEY ? purgeMovedKitchensWithServiceRole : undefined);
+  app.get('/internal/bigtable/cron', async (context) => {
+    requireCronSecret(config, context.req.header('Authorization'));
+    if (!purgeMovedKitchens) throw new ApiError(503, 'STORAGE_NOT_CONFIGURED', 'BigTable storage is not configured');
+    return context.json({ purgedKitchens: await purgeMovedKitchens() }, 200);
+  });
 
   registerBigTable(app, verifyToken);
   registerAppLinks(app, config);
@@ -222,13 +258,21 @@ export function createApp(options: AppOptions = {}) {
   return app;
 }
 
+let sharedDatabase: Sql | undefined;
 let sharedHearken: HearkenService | undefined;
 
 /** One database pool per process, however many times the app is built. */
-function createHearkenFromConfig(config: Config): HearkenService | undefined {
+function databaseFromConfig(config: Config): Sql | undefined {
   if (!config.DATABASE_URL) return undefined;
+  sharedDatabase ??= createDatabase(config.DATABASE_URL);
+  return sharedDatabase;
+}
+
+function createHearkenFromConfig(config: Config): HearkenService | undefined {
+  const sql = databaseFromConfig(config);
+  if (!sql) return undefined;
   sharedHearken ??= createHearkenService({
-    sql: createDatabase(config.DATABASE_URL),
+    sql,
     apns: config.APNS_KEY_ID && config.APNS_TEAM_ID && config.APNS_PRIVATE_KEY
       ? createApnsSender({ keyId: config.APNS_KEY_ID, teamId: config.APNS_TEAM_ID, privateKey: config.APNS_PRIVATE_KEY })
       : undefined,
@@ -236,4 +280,14 @@ function createHearkenFromConfig(config: Config): HearkenService | undefined {
     publicBaseUrl: config.PUBLIC_BASE_URL,
   });
   return sharedHearken;
+}
+
+/** `bigtable_purge_moved_kitchens()` (supabase/migrations/20261019200000_bigtable_kitchen_moves_to_icloud.sql), run with the secret key. */
+async function purgeMovedKitchensWithServiceRole(): Promise<number> {
+  const { data, error } = await supabaseAdmin.rpc('bigtable_purge_moved_kitchens');
+  if (error) {
+    console.error('BigTable kitchen purge failed', { code: error.code });
+    throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'The kitchen purge could not run');
+  }
+  return typeof data === 'number' ? data : 0;
 }

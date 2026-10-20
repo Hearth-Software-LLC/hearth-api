@@ -2,7 +2,13 @@ import { NextRequest, NextResponse } from "../next-shim.js";
 
 import { buildGroceryList, GroceryListGenerationError } from "../lib/ai-grocery-list.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
-import { contextFromHearth, parseHearthHousehold, type HearthAIContext } from "../lib/hearth-household.js";
+import {
+  contextFromHearth,
+  contextFromStoredHousehold,
+  parseHearthHousehold,
+  type HearthAIContext,
+  type StoredHouseholdSeat,
+} from "../lib/hearth-household.js";
 import { getMembershipContext } from "../lib/household.js";
 import { DAYS, SLOTS } from "../lib/planner-contract.js";
 import { canConsumeCredits, getUsageStatus, incrementUsageBy } from "../lib/rate-limit.js";
@@ -625,38 +631,34 @@ function aggregateIngredientNeeds(
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * The stored BigTable household, for clients that don't send a Hearth household yet. Reduced to
+ * what the iCloud path sends (ages, roles, restrictions, likes, dislikes): member names and the
+ * household name never reach the AI provider.
+ */
 async function getHouseholdContext(profileId: string) {
-  const [profileResult, membersResult, restrictionsResult] = await Promise.all([
-    supabaseAdmin
-      .from("profiles")
-      .select("household_name")
-      .eq("id", profileId)
-      .maybeSingle(),
+  const [membersResult, restrictionsResult] = await Promise.all([
     supabaseAdmin
       .from("household_members")
-      .select("name")
+      .select("date_of_birth, likes, dislikes")
       .eq("profile_id", profileId),
     supabaseAdmin.from("dietary_restrictions").select("value").eq("profile_id", profileId),
   ]);
 
-  if (profileResult.error || membersResult.error || restrictionsResult.error) {
+  if (membersResult.error || restrictionsResult.error) {
     throw new Error(
-      profileResult.error?.message
-        ?? membersResult.error?.message
+      membersResult.error?.message
         ?? restrictionsResult.error?.message
         ?? "Failed loading context"
     );
   }
 
-  return {
-    householdName: profileResult.data?.household_name ?? null,
-    memberNames: (membersResult.data ?? [])
-      .map((entry) => entry.name)
-      .filter((value): value is string => typeof value === "string" && value.trim().length > 0),
-    restrictions: (restrictionsResult.data ?? [])
+  return contextFromStoredHousehold(
+    (membersResult.data ?? []) as StoredHouseholdSeat[],
+    (restrictionsResult.data ?? [])
       .map((entry) => entry.value)
-      .filter((value): value is string => typeof value === "string" && value.trim().length > 0),
-  };
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+  );
 }
 
 export async function POST(request: NextRequest) {

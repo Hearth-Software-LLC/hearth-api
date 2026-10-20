@@ -106,3 +106,46 @@ export function contextFromHearth(household: HearthAIContext): AIHouseholdContex
     ],
   };
 }
+
+/** A seat in the household BigTable still stores, as the AI fallback reads it. Never the name. */
+export type StoredHouseholdSeat = {
+  date_of_birth?: unknown;
+  likes?: unknown;
+  dislikes?: unknown;
+};
+
+/** Whole years since a YYYY-MM-DD birthday, or null when there isn't a usable one. */
+export function ageFromDateOfBirth(value: unknown, now: Date = new Date()): number | null {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value.trim())) {
+    return null;
+  }
+  const [year, month, day] = value.trim().split("-").map(Number) as [number, number, number];
+  let age = now.getUTCFullYear() - year;
+  if (now.getUTCMonth() + 1 < month || (now.getUTCMonth() + 1 === month && now.getUTCDate() < day)) {
+    age -= 1;
+  }
+  return age >= 0 && age < 130 ? age : null;
+}
+
+/**
+ * The prompt context from the household BigTable still stores, for clients that don't send a
+ * Hearth household yet. It carries exactly what the iCloud path carries: each person's age and
+ * role, the food rules, likes and dislikes. No member names and no household name.
+ */
+export function contextFromStoredHousehold(
+  seats: StoredHouseholdSeat[],
+  restrictions: string[],
+  now: Date = new Date()
+): AIHouseholdContext {
+  const people = seats.slice(0, MAX_PEOPLE).map((seat) => {
+    const age = ageFromDateOfBirth(seat.date_of_birth, now);
+    return { age, role: age !== null && age < 18 ? "kid" : "adult" } as const;
+  });
+  return contextFromHearth({
+    people,
+    allergies: [],
+    restrictions: restrictions.map((value) => value.trim()).filter(Boolean),
+    likes: cleanList(seats.flatMap((seat) => (Array.isArray(seat.likes) ? seat.likes : []))),
+    dislikes: cleanList(seats.flatMap((seat) => (Array.isArray(seat.dislikes) ? seat.dislikes : []))),
+  });
+}

@@ -9,6 +9,8 @@ The shared TypeScript/Hono backend for the Hearth iOS apps (BigTable, Suffice, S
 | `GET /health` | Public | Liveness only; does not probe providers |
 | `GET /openapi.json` | Public | Generated API contract, including bearer authentication |
 | `GET /v1/me` | Supabase JWT | Returns the verified user subject |
+| `DELETE /v1/me` | Supabase JWT | Deletes the caller's Hearth account in every app (see [Account deletion](#account-deletion)); `204` |
+| `POST /v1/reports` | Linked Supabase user | Reports content or a person for review; `201 {"id"}`; 20 per person per day (see [Reports](#reports)) |
 | `GET /v1/brands/logo?domain=apple.com` | Anonymous or linked Supabase user + shared quota | Returns a direct Logo.dev image URL |
 | `POST /v1/brands/logos` | Anonymous or linked Supabase user + shared quota | Up to 24 Logo.dev image URLs at once, by domain or known brand name |
 | `GET /v1/foods/search?q=apple` | Anonymous or linked Supabase user + shared quota | Searches USDA FoodData Central summaries |
@@ -39,10 +41,11 @@ Study groups live under `/v1/hearken/*` (they used to be CloudKit shares). A gro
 
 - **Storage:** `hk_*` tables from `supabase/migrations/20261019190345_hearken_study_groups.sql`, reached over a direct Postgres connection (`DATABASE_URL`, the Supabase transaction pooler on port 6543). RLS is on with no policies, so client keys can't reach them. Code: `src/hearken/service.ts` (queries, permissions, notifications) and `src/hearken/routes.ts`.
 - **Notifications:** sent straight to APNs (`src/integrations/apns.ts`) with a .p8 key, so they work for native apps. Devices register with `PUT /v1/hearken/push-tokens`. Each member chooses per group: replies to their posts, mentions, every reply, the weekly question, and daily reading activity.
+- **Blocking:** `GET /v1/hearken/blocks` (`{"userIDs": [...]}`), `PUT /v1/hearken/blocks/{userID}` and `DELETE /v1/hearken/blocks/{userID}` (both `204`; blocking yourself is a `400`). Stored in `hk_blocks` (`supabase/migrations/20261020120100_hearken_blocks.sql`). Group reads (the group and its feed, `/items`, `/comments`, `/questions`) leave out posts, replies and answers by people the caller blocked, including reply counts and the latest reply. Members, and questions, are still listed. Rows go with either account.
 - **Scheduled work:** Vercel Cron calls `GET /internal/hearken/cron` daily at 13:00 UTC (7 AM in Utah in summer) with `CRON_SECRET`. It announces scheduled questions, tells people who haven't answered that answers are waiting (two days in, once), and purges anything deleted more than 30 days ago. A question that reaches its time between runs is announced by the first request that loads the group.
 - **Invites:** 8-character codes; links are `https://api.hearthapps.com/hearken/join/<code>`, opened in Hearken through `apple-app-site-association` when `APPLE_APP_IDS` includes `BH8R3BX5WF.com.stephenwarren.hearken`.
 - **Moving from CloudKit:** the owner's device posts the group to `POST /v1/hearken/groups/import` and leaves the returned migration token in the old CloudKit zone; each member's device claims its seat with `POST /v1/hearken/groups/claim`, which also hands back their posts and reactions.
-- **Account deletion:** `DELETE /v1/hearken/me` hands owned groups to a leader (or the longest-standing member) and removes the person's posts, replies, answers, reactions and devices.
+- **Account deletion:** `DELETE /v1/hearken/me` hands owned groups to a leader (or the longest-standing member) and removes the person's posts, replies, answers, reactions, blocks and devices (posts and replies are purged after 30 days). Deleting the whole Hearth account (`DELETE /v1/me`) does the same but deletes everything the person wrote immediately (`purgeUser`), including their questions and the replies and reactions on what they wrote.
 
 Tests in `tests/hearken/` run against a real database when `HEARKEN_TEST_DATABASE_URL` points at an empty scratch Postgres (they're skipped otherwise):
 
@@ -52,11 +55,39 @@ HEARKEN_TEST_DATABASE_URL=postgres://localhost/hearken_test npm test
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Postgres connection string for the Hearth project (transaction pooler) |
+| `DATABASE_URL` | Postgres connection string for the Hearth project (transaction pooler); also used by `POST /v1/reports` |
 | `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_PRIVATE_KEY` | APNs auth key (.p8): its id, the team id, and the key's PEM text (`\n` escapes allowed) |
 | `HEARKEN_APNS_TOPIC` | Hearken's bundle id; default `com.stephenwarren.hearken` |
 | `CRON_SECRET` | Shared secret Vercel Cron sends to `/internal/*` (16+ characters) |
 | `PUBLIC_BASE_URL` | Base of invite links; default `https://api.hearthapps.com` |
+
+## Account deletion
+
+`DELETE /v1/me` deletes the caller's Hearth account for every app; `src/services/account-deletion.ts` holds the one implementation, which `DELETE /v1/bigtable/me` also uses. In order:
+
+1. **BigTable:** refuses with `409 HOUSEHOLD_HAS_MEMBERS` (nothing deleted) while the caller runs a household with other people in it; removes their member avatars from storage.
+2. **Hearken:** groups pass to another member; posts, replies, answers, reactions, questions and blocks are deleted now, and so are the caller's `content_reports`.
+3. **Suffice:** every `plaid_connections` row the caller owns is removed at Plaid (`/item/remove`; an item Plaid no longer knows is fine) and deleted.
+4. **RevenueCat:** the customer is deleted whatever the tier (a 404 is fine). `DELETE /v1/bigtable/me` still deletes it only for a paid BigTable tier.
+5. **Push tokens**, a "member left" notification to a household organizer, then `auth.admin.deleteUser`, whose foreign keys take BigTable's remaining rows.
+
+`hk_*`, `plaid_connections` and `content_reports` have no foreign key to `auth.users`, so step 2 and 3 delete them explicitly. Every step can be repeated, so a failed deletion (`503 ACCOUNT_DELETION_FAILED`, or Plaid's `502`/`503`/`504`) can be retried. An anonymous session just deletes its auth user. `DELETE /v1/bigtable/me` keeps its old responses (`200 {"ok":true}`, `409` with `CONFLICT`) and now also runs the Hearken and Plaid cleanup.
+
+## Reports
+
+`POST /v1/reports` takes `{"app": "bigtable"|"hearken", "kind": "recipe"|"profile"|"post"|"comment"|"answer"|"question"|"member", "targetId", "groupId"?, "reason": "spam"|"harassment"|"hate"|"sexual"|"violence"|"self_harm"|"other", "details"? (≤ 1000)}` and answers `201 {"id"}`. Anonymous sessions get `401`; more than 20 reports in 24 hours gets `429 RATE_LIMITED`. Reports land in `content_reports` (`supabase/migrations/20261020120000_content_reports.sql`, service role only) with `status = 'open'`, over `DATABASE_URL`; review the open ones in the Supabase dashboard:
+
+```sql
+select * from content_reports where status = 'open' order by created_at;
+```
+
+## BigTable kitchen purge
+
+Vercel Cron calls `GET /internal/bigtable/cron` daily at 04:17 UTC with `CRON_SECRET` (the same check as Hearken's job). It runs `bigtable_purge_moved_kitchens()` with the Supabase secret key, deleting the server copy of kitchens moved to iCloud more than 30 days ago, and answers `{"purgedKitchens": n}`. It replaces the pg_cron schedule left commented out in `20261019200000_bigtable_kitchen_moves_to_icloud.sql`; don't enable both.
+
+## AI and the household
+
+Meal plans and grocery lists use the Hearth household the app sends (ages, roles, allergies, diets, likes, dislikes; never names). When an older app sends none, the stored BigTable household is reduced to the same thing (age from the birthday, kid under 18, otherwise adult) before anything goes to Anthropic: member names and the household name are never sent. Recipe-scan failures log the upstream status and Anthropic's error type only.
 
 ## Database
 

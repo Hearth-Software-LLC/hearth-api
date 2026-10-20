@@ -97,7 +97,13 @@ function createTableMock(table: string) {
   if (table === "household_members") {
     return {
       select: vi.fn(() => ({
-        eq: vi.fn(async () => ({ data: household.memberNames.map((name) => ({ name })), error: null })),
+        // Rows carry names too, so the tests prove the AI context never uses them.
+        eq: vi.fn(async () => ({
+          data: household.memberNames.map((name, index) => ({
+            name, date_of_birth: index === 0 ? "1984-01-01" : null, likes: ["Tacos"], dislikes: index === 0 ? ["Olives"] : [],
+          })),
+          error: null,
+        })),
       })),
     };
   }
@@ -430,6 +436,43 @@ describe("POST /api/ai/meal-plan", () => {
     expect(buildMealPlan).toHaveBeenCalledTimes(1);
     const mealPlanArgs = buildMealPlan.mock.calls[0]?.[0] as { restrictions?: string[] };
     expect(mealPlanArgs.restrictions).toEqual(expect.arrayContaining(["no pork", "nut allergy", "gluten free"]));
+  });
+
+  it("sends the stored household without member or household names", async () => {
+    getUserIdFromAuthHeader.mockResolvedValue("organizer-1");
+    membershipOrganizerId = null;
+    linkedMemberIds = [];
+    dietaryRestrictionRows = [{ value: "no pork", profile_id: "organizer-1" }];
+    getUsageStatus.mockResolvedValue({
+      tier: "pro", requestsUsed: 2, requestsLimit: 1000000, resetsAt: "2026-06-01T00:00:00.000Z", canMakeRequest: true,
+    });
+    buildMealPlan.mockResolvedValue({
+      source: "fallback",
+      plan: Object.fromEntries(["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        .map((day) => [day, { breakfast: "A", lunch: "B", dinner: "C" }])),
+    });
+
+    const { POST } = await import("../../src/bigtable/routes/ai.meal-plan.js");
+    const response = await POST(
+      buildAuthenticatedJsonRequest("http://localhost/api/ai/meal-plan", { prompt: "busy week" }) as never
+    );
+
+    expect(response.status).toBe(200);
+    const args = buildMealPlan.mock.calls[0]?.[0] as {
+      householdName: string | null;
+      householdMembers: string[];
+      householdLikes: string[];
+      householdDislikes: string[];
+      restrictions: string[];
+    };
+    expect(args.householdName).toBeNull();
+    expect(args.householdMembers).toEqual([expect.stringMatching(/^Adult, \d+$/), "Adult"]);
+    expect(args.householdLikes).toEqual(["Tacos"]);
+    expect(args.householdDislikes).toEqual(["Olives"]);
+    expect(args.restrictions).toEqual(["no pork"]);
+    const sent = JSON.stringify(args);
+    for (const name of householdFixture().memberNames) expect(sent).not.toContain(name);
+    expect(sent).not.toContain(householdFixture().householdName);
   });
 
   it("uses the Hearth household from the request instead of the stored one, without names", async () => {

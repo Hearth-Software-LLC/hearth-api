@@ -5,6 +5,7 @@ import { createApp } from '../../src/app.js';
 import { readConfig } from '../../src/config.js';
 import type { ApnsMessage, ApnsResult } from '../../src/integrations/apns.js';
 import { LIMITS, createHearkenService } from '../../src/hearken/service.js';
+import { REPORTS_PER_DAY, createReportStore } from '../../src/services/reports.js';
 
 // Runs against a real Postgres: set HEARKEN_TEST_DATABASE_URL to an empty scratch database.
 // The migration is applied once; every test starts with empty tables.
@@ -73,9 +74,15 @@ describe.skipIf(!url)('Hearken study groups', () => {
   }
 
   beforeAll(async () => {
-    const [exists] = await sql`select to_regclass('public.hk_groups') as name`;
-    if (!exists?.name) {
-      await sql.unsafe(readFileSync(new URL('../../supabase/migrations/20261019190345_hearken_study_groups.sql', import.meta.url), 'utf8'));
+    for (const [table, migration] of [
+      ['hk_groups', '20261019190345_hearken_study_groups.sql'],
+      ['hk_blocks', '20261020120100_hearken_blocks.sql'],
+      ['content_reports', '20261020120000_content_reports.sql'],
+    ] as const) {
+      const [exists] = await sql`select to_regclass(${`public.${table}`}) as name`;
+      if (!exists?.name) {
+        await sql.unsafe(readFileSync(new URL(`../../supabase/migrations/${migration}`, import.meta.url), 'utf8'));
+      }
     }
   });
   beforeEach(async () => {
@@ -83,6 +90,8 @@ describe.skipIf(!url)('Hearken study groups', () => {
     // also run as the API's own restricted role.)
     await sql`delete from hk_groups`;
     await sql`delete from hk_push_tokens`;
+    await sql`delete from hk_blocks`;
+    await sql`delete from content_reports`;
     sent.length = 0;
     apnsResult = 'sent';
     clock = new Date('2026-10-19T15:00:00Z');
@@ -412,6 +421,105 @@ describe.skipIf(!url)('Hearken study groups', () => {
         migrationToken: 'not-a-real-token-at-all', legacyUserId: '_lily', displayName: 'Lily', initials: 'LJ',
       })).status).toBe(404);
     });
+  });
+
+  describe('blocking', () => {
+    it('leaves blocked people out of the feed, replies and answers, until unblocked', async () => {
+      const group = await familyGroup();
+      const item = await call('lily', 'POST', `/v1/hearken/groups/${group.id}/items`, {
+        kind: 'reflection', chapterId: '', startVerse: 0, endVerse: 0, text: '', note: 'From Lily', authorName: 'Lily Jensen',
+      });
+      const own = await call('david', 'POST', `/v1/hearken/groups/${group.id}/items`, {
+        kind: 'reflection', chapterId: '', startVerse: 0, endVerse: 0, text: '', note: 'From David', authorName: 'David Jensen',
+      });
+      await call('lily', 'POST', `/v1/hearken/groups/${group.id}/comments`, {
+        targetType: 'item', targetId: own.body.id, body: 'Lily replying', authorName: 'Lily Jensen',
+      });
+      await call('sarah', 'POST', `/v1/hearken/groups/${group.id}/comments`, {
+        targetType: 'item', targetId: own.body.id, body: 'Sarah replying', authorName: 'Sarah Jensen',
+      });
+      const question = (await call('sarah', 'POST', `/v1/hearken/groups/${group.id}/questions`, {
+        text: 'One thing?', authorName: 'Sarah Jensen', hideAnswers: false,
+      })).body;
+      await call('lily', 'PUT', `/v1/hearken/groups/${group.id}/questions/${question.id}/answer`, { body: 'Lily answer', authorName: 'Lily' });
+
+      // A PUT without a body, like reactions.
+      expect((await app.request(`/v1/hearken/blocks/${users.lily}`, { method: 'PUT', headers: { Authorization: 'Bearer david' } })).status).toBe(204);
+      expect((await call('david', 'PUT', `/v1/hearken/blocks/${users.lily}`)).status).toBe(204);
+      expect((await call('david', 'GET', '/v1/hearken/blocks')).body).toEqual({ userIDs: [users.lily] });
+
+      const view = (await call('david', 'GET', `/v1/hearken/groups/${group.id}`)).body;
+      expect(view.items.map((entry: { note: string }) => entry.note)).toEqual(['From David']);
+      expect(view.items[0]).toMatchObject({ commentCount: 1, latestComment: { body: 'Sarah replying' } });
+      expect(view.question).toMatchObject({ answers: [], answerCount: 0 });
+      // Paging is relative to the test clock, which is behind the database's created_at.
+      expect((await call('david', 'GET', `/v1/hearken/groups/${group.id}/items?before=2099-01-01T00:00:00Z`)).body.items).toHaveLength(1);
+      const thread = await call('david', 'GET', `/v1/hearken/groups/${group.id}/comments?targetType=item&targetId=${own.body.id}`);
+      expect(thread.body.items.map((comment: { body: string }) => comment.body)).toEqual(['Sarah replying']);
+      // Members are still listed, and other people still see everything.
+      expect(view.members.map((member: { userId: string }) => member.userId)).toContain(users.lily);
+      expect((await call('sarah', 'GET', `/v1/hearken/groups/${group.id}`)).body.items).toHaveLength(2);
+
+      expect((await call('david', 'DELETE', `/v1/hearken/blocks/${users.lily}`)).status).toBe(204);
+      const after = (await call('david', 'GET', `/v1/hearken/groups/${group.id}`)).body;
+      expect(after.items.map((entry: { id: string }) => entry.id)).toContain(item.body.id);
+      expect((await call('david', 'GET', '/v1/hearken/blocks')).body).toEqual({ userIDs: [] });
+    });
+
+    it('refuses blocking yourself, bad ids and anonymous sessions', async () => {
+      expect((await call('david', 'PUT', `/v1/hearken/blocks/${users.david}`)).status).toBe(400);
+      expect((await call('david', 'PUT', '/v1/hearken/blocks/not-a-uuid')).status).toBe(400);
+      expect((await call('anonymous', 'GET', '/v1/hearken/blocks')).status).toBe(403);
+    });
+  });
+
+  it('purges everything a deleted account wrote, now', async () => {
+    const group = await familyGroup();
+    const item = (await call('sarah', 'POST', `/v1/hearken/groups/${group.id}/items`, {
+      kind: 'reflection', chapterId: '', startVerse: 0, endVerse: 0, text: '', note: 'Mine', authorName: 'Sarah',
+    })).body;
+    const reply = (await call('david', 'POST', `/v1/hearken/groups/${group.id}/comments`, {
+      targetType: 'item', targetId: item.id, body: 'On Sarah’s post', authorName: 'David',
+    })).body;
+    await call('lily', 'PUT', `/v1/hearken/groups/${group.id}/reactions/comment/${reply.id}/heart`);
+    const lilyPost = (await call('lily', 'POST', `/v1/hearken/groups/${group.id}/items`, {
+      kind: 'reflection', chapterId: '', startVerse: 0, endVerse: 0, text: '', note: 'Lily’s', authorName: 'Lily',
+    })).body;
+    await call('sarah', 'POST', `/v1/hearken/groups/${group.id}/comments`, {
+      targetType: 'item', targetId: lilyPost.id, body: 'Sarah on Lily’s post', authorName: 'Sarah',
+    });
+    await call('sarah', 'PUT', `/v1/hearken/groups/${group.id}/reactions/item/${lilyPost.id}/heart`);
+    const question = (await call('sarah', 'POST', `/v1/hearken/groups/${group.id}/questions`, { text: 'One thing?', authorName: 'Sarah' })).body;
+    await call('david', 'PUT', `/v1/hearken/groups/${group.id}/questions/${question.id}/answer`, { body: 'Mine', authorName: 'David' });
+    await call('sarah', 'PUT', `/v1/hearken/blocks/${users.ben}`);
+    await call('lily', 'PUT', `/v1/hearken/blocks/${users.sarah}`);
+
+    await service.purgeUser(users.sarah);
+
+    expect(await sql`select 1 from hk_items where author_id = ${users.sarah}`).toHaveLength(0);
+    expect(await sql`select 1 from hk_comments where author_id = ${users.sarah} or target_id = ${item.id}`).toHaveLength(0);
+    expect(await sql`select 1 from hk_reactions where user_id = ${users.sarah} or target_id = ${reply.id}`).toHaveLength(0);
+    expect(await sql`select 1 from hk_questions where author_id = ${users.sarah}`).toHaveLength(0);
+    expect(await sql`select 1 from hk_answers where question_id = ${question.id}`).toHaveLength(0);
+    expect(await sql`select 1 from hk_blocks where blocker_id = ${users.sarah} or blocked_id = ${users.sarah}`).toHaveLength(0);
+    expect(await sql`select 1 from hk_push_tokens where user_id = ${users.sarah}`).toHaveLength(0);
+    const view = await call('david', 'GET', `/v1/hearken/groups/${group.id}`);
+    expect(view.body).toMatchObject({ ownerId: users.david });
+    expect(view.body.items.map((entry: { id: string }) => entry.id)).toEqual([lilyPost.id]);
+  });
+
+  it('stores reports and caps them per person per day', async () => {
+    const reports = createReportStore(sql);
+    const report = { app: 'hearken', kind: 'post', targetId: 'item-1', groupId: null, reason: 'spam', details: null } as const;
+    for (let index = 0; index < REPORTS_PER_DAY; index += 1) {
+      expect(await reports.create(users.david, report)).toMatch(/^[0-9a-f-]{36}$/);
+    }
+    expect(await reports.create(users.david, report)).toBeNull();
+    expect(await reports.create(users.lily, { ...report, groupId: '5b0b8f1e-2d3c-4a5b-9c8d-7e6f5a4b3c2d', details: 'Why' })).not.toBeNull();
+    const [row] = await sql`select status from content_reports where reporter_id = ${users.lily}`;
+    expect(row?.status).toBe('open');
+    await reports.removeByReporter(users.david);
+    expect(await sql`select 1 from content_reports where reporter_id = ${users.david}`).toHaveLength(0);
   });
 
   it('deletes everything about a person, handing their groups on', async () => {

@@ -3,7 +3,13 @@ import { NextRequest, NextResponse } from "../next-shim.js";
 import { buildMealPlan } from "../lib/ai-meal-plan.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { getMembershipContext } from "../lib/household.js";
-import { contextFromHearth, parseHearthHousehold, type HearthAIContext } from "../lib/hearth-household.js";
+import {
+  contextFromHearth,
+  contextFromStoredHousehold,
+  parseHearthHousehold,
+  type HearthAIContext,
+  type StoredHouseholdSeat,
+} from "../lib/hearth-household.js";
 import { DAYS, SLOTS, type DayOfWeek, type MealSlotType } from "../lib/planner-contract.js";
 import { canConsumeCredits, getUsageStatus, incrementUsageBy } from "../lib/rate-limit.js";
 import {
@@ -826,24 +832,23 @@ async function loadBaselinePlannersByWeek(profileId: string, selectedDateSlots: 
   return new Map(planners);
 }
 
+/**
+ * The stored BigTable household, for clients that don't send a Hearth household yet. Reduced to
+ * what the iCloud path sends (ages, roles, restrictions, likes, dislikes): member names and the
+ * household name never reach the AI provider.
+ */
 async function getHouseholdContext(profileId: string) {
-  const [profileResult, membersResult, linkedMemberResult] = await Promise.all([
-    supabaseAdmin
-      .from("profiles")
-      .select("household_name")
-      .eq("id", profileId)
-      .maybeSingle(),
-    supabaseAdmin.from("household_members").select("name, likes, dislikes").eq("profile_id", profileId),
+  const [membersResult, linkedMemberResult] = await Promise.all([
+    supabaseAdmin.from("household_members").select("date_of_birth, likes, dislikes").eq("profile_id", profileId),
     supabaseAdmin
       .from("household_memberships")
       .select("member_id")
       .eq("organizer_id", profileId),
   ]);
 
-  if (profileResult.error || membersResult.error || linkedMemberResult.error) {
+  if (membersResult.error || linkedMemberResult.error) {
     throw new Error(
-      profileResult.error?.message
-        ?? membersResult.error?.message
+      membersResult.error?.message
         ?? linkedMemberResult.error?.message
         ?? "Failed loading context"
     );
@@ -867,35 +872,12 @@ async function getHouseholdContext(profileId: string) {
     throw new Error(restrictionsResult.error.message);
   }
 
-  const householdLikes = new Set<string>();
-  const householdDislikes = new Set<string>();
-  (membersResult.data ?? []).forEach((entry) => {
-    const likes = Array.isArray(entry.likes) ? entry.likes : [];
-    likes
-      .filter((value): value is string => typeof value === "string")
-      .map((value) => value.trim())
-      .filter(Boolean)
-      .forEach((value) => householdLikes.add(value));
-
-    const dislikes = Array.isArray(entry.dislikes) ? entry.dislikes : [];
-    dislikes
-      .filter((value): value is string => typeof value === "string")
-      .map((value) => value.trim())
-      .filter(Boolean)
-      .forEach((value) => householdDislikes.add(value));
-  });
-
-  return {
-    householdName: profileResult.data?.household_name ?? null,
-    memberNames: (membersResult.data ?? [])
-      .map((entry) => entry.name)
-      .filter((value): value is string => typeof value === "string" && value.trim().length > 0),
-    householdLikes: Array.from(householdLikes).slice(0, 40),
-    householdDislikes: Array.from(householdDislikes).slice(0, 40),
-    restrictions: (restrictionsResult.data ?? [])
+  return contextFromStoredHousehold(
+    (membersResult.data ?? []) as StoredHouseholdSeat[],
+    (restrictionsResult.data ?? [])
       .map((entry) => entry.value)
-      .filter((value): value is string => typeof value === "string" && value.trim().length > 0),
-  };
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+  );
 }
 
 async function persistPlanAcrossDates(
