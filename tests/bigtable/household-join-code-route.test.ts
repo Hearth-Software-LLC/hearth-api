@@ -109,6 +109,23 @@ describe("POST /household/join", () => {
     insertNotification.mockResolvedValue(undefined);
   });
 
+  it("sets a kid's permissions from their household role", async () => {
+    const { POST } = await import("../../src/bigtable/routes/household.join.js");
+    const response = await POST(request("join", { code: "family-code-bbbbbbbbbbbbbbbb", role: "kid" }));
+
+    expect(response.status).toBe(200);
+    const [permissions] = fake.callsTo("household_member_permissions", "upsert");
+    expect(permissions!.payload).toMatchObject({
+      member_id: "joiner-1", can_manage_meal_plan: false, can_use_ai_meal_plan: false, can_use_ai_grocery: false,
+    });
+  });
+
+  it("rejects an unknown role", async () => {
+    const { POST } = await import("../../src/bigtable/routes/household.join.js");
+    const response = await POST(request("join", { code: "family-code-bbbbbbbbbbbbbbbb", role: "boss" }));
+    expect(response.status).toBe(400);
+  });
+
   it("joins the household, grants AI access and tells the organizer", async () => {
     const { POST } = await import("../../src/bigtable/routes/household.join.js");
     const response = await POST(request("join", { code: "family-code-bbbbbbbbbbbbbbbb" }));

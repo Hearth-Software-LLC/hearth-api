@@ -68,7 +68,7 @@ function honoPath(path: string): string {
 }
 
 function summaryFor(route: BigTableRoute): string {
-  return `${route.method} ${route.path.replace('/v1/bigtable/', '')}`;
+  return `${route.method} ${route.path.replace('/v1/bigtable/', '').replace('/v1/', '')}`;
 }
 
 // Next.js prefers static path segments over dynamic ones (/recipes/favorites over
@@ -107,7 +107,7 @@ export function registerBigTable(app: OpenAPIHono<ApiEnvironment>, verifyToken: 
     app.openAPIRegistry.registerPath({
       method: route.method.toLowerCase() as 'get' | 'post' | 'put' | 'patch' | 'delete',
       path: route.path,
-      tags: [route.path.startsWith('/webhooks/') ? 'Webhooks' : 'BigTable'],
+      tags: [route.path.startsWith('/webhooks/') ? 'Webhooks' : route.path.startsWith('/v1/household/') ? 'Household' : 'BigTable'],
       summary: summaryFor(route),
       ...(route.auth ? { security: [{ BearerAuth: [] }] } : {}),
       ...(paramNames.length > 0

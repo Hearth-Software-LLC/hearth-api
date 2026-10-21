@@ -5,11 +5,13 @@ import { insertNotification } from "../lib/notifications.js";
 import { loadPublicDisplayName } from "../lib/public-identity.js";
 import { serverError } from "../lib/server-error.js";
 import { supabaseAdmin } from "../../services/supabase.js";
+import { permissionsFor, type Role } from "./household.members.js";
 
 // Joining a household with its join code. Creates the same membership the invitation-accept path
 // does (via the bigtable_join_household SQL helper, the invitation-free twin of
-// accept_household_invitation) and grants the AI permissions, so the member can use the
-// household's AI features.
+// accept_household_invitation) and sets the member's permissions from their household role
+// (`role`: parent, adult or kid; adult when missing). The organizer's app corrects the role
+// later if it differs (PUT /household/members).
 
 type JsonObject = Record<string, unknown>;
 
@@ -45,6 +47,12 @@ export async function POST(request: Request) {
   if (!code || code.length > MAX_CODE_LENGTH) {
     return NextResponse.json({ error: "code is required" }, { status: 400 });
   }
+
+  const rawRole = body?.role;
+  if (rawRole !== undefined && rawRole !== "parent" && rawRole !== "adult" && rawRole !== "kid") {
+    return NextResponse.json({ error: "role must be parent, adult or kid" }, { status: 400 });
+  }
+  const role: Role = rawRole ?? "adult";
 
   const codeResult = await supabaseAdmin
     .from("bigtable_join_codes")
@@ -134,14 +142,13 @@ export async function POST(request: Request) {
     return conflict("You're already a member of another household. Leave it before joining this one.");
   }
 
-  // Shared subscription: the member can use the household's AI features.
+  // What they can do with the organizer's plan follows their household role.
   const permissionsResult = await supabaseAdmin
     .from("household_member_permissions")
     .upsert(
       {
         member_id: userId,
-        can_use_ai_meal_plan: true,
-        can_use_ai_grocery: true,
+        ...permissionsFor(role),
         updated_at: new Date().toISOString(),
       },
       { onConflict: "member_id" }

@@ -19,6 +19,7 @@ import * as householdJoinCodeRoute from './routes/household.join-code.js';
 import * as householdJoinRoute from './routes/household.join.js';
 import * as householdMembersMemberIdPermissionsRoute from './routes/household.members._memberId.permissions.js';
 import * as householdMembersMemberIdRoute from './routes/household.members._memberId.js';
+import * as householdMembersRoute from './routes/household.members.js';
 import * as inviteRoute from './routes/invite.js';
 import * as maestroResetRoute from './routes/maestro.reset.js';
 import * as meKitchenExportRoute from './routes/me.kitchen-export.js';
@@ -89,6 +90,11 @@ export const bigTableRoutes: BigTableRoute[] = [
   { method: 'GET', path: '/v1/bigtable/household/members/{memberId}/permissions', handler: householdMembersMemberIdPermissionsRoute.GET, auth: true },
   { method: 'PATCH', path: '/v1/bigtable/household/members/{memberId}/permissions', handler: householdMembersMemberIdPermissionsRoute.PATCH, auth: true },
   { method: 'DELETE', path: '/v1/bigtable/household/members/{memberId}', handler: householdMembersMemberIdRoute.DELETE, auth: true },
+  // The Hearth household's server side, for every Hearth app (not just BigTable).
+  { method: 'POST', path: '/v1/household/join-code', handler: householdJoinCodeRoute.POST, auth: true },
+  { method: 'POST', path: '/v1/household/join', handler: householdJoinRoute.POST, auth: true },
+  { method: 'PUT', path: '/v1/household/members', handler: householdMembersRoute.PUT, auth: true },
+  { method: 'DELETE', path: '/v1/household/members/{memberId}', handler: householdMembersMemberIdRoute.DELETE, auth: true },
   { method: 'POST', path: '/v1/bigtable/invite', handler: inviteRoute.POST, auth: true },
   { method: 'POST', path: '/v1/bigtable/maestro/reset', handler: maestroResetRoute.POST, auth: false },
   { method: 'GET', path: '/v1/bigtable/me/kitchen-export', handler: meKitchenExportRoute.GET, auth: true },
