@@ -2,7 +2,7 @@ import { NextResponse } from "../next-shim.js";
 
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 // The app calls this once the family's kitchen (recipes, tags, plans, grocery lists, household)
 // is safely in iCloud. 30 days later public.bigtable_purge_moved_kitchens() deletes the server

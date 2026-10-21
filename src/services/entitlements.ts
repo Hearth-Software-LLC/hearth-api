@@ -1,8 +1,8 @@
 import type { MiddlewareHandler } from 'hono';
 import type { ApiEnvironment } from '../contracts/common.js';
 import { ApiError } from '../errors.js';
-import { APP_PLAN_NAME, hasAppAccess } from '../bigtable/lib/entitlements.js';
-import type { EffectiveEntitlement, HearthApp } from '../bigtable/lib/entitlements.js';
+import { APP_PLAN_NAME, hasAppAccess } from './subscriptions.js';
+import type { EffectiveEntitlement, HearthApp } from './subscriptions.js';
 
 /** Someone's active entitlements: their own plus their household organizer's. */
 export type EntitlementSource = (userId: string) => Promise<EffectiveEntitlement[]>;

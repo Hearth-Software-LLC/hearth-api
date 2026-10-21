@@ -37,7 +37,7 @@ vi.mock("../../src/bigtable/lib/auth.js", () => ({
   getUserIdFromAuthHeader,
 }));
 
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({
+vi.mock("../../src/services/supabase.js", () => ({
   supabaseAdmin: {
     from: fromMock,
   },

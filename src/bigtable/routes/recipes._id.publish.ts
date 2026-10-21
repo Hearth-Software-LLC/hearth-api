@@ -4,7 +4,7 @@ import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { fanOutRecipePublishNotification } from "../lib/notifications.js";
 import { parseRecipeVersionContent } from "../lib/recipe-versioning.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 function isPublishingEnabled() {
   return process.env.RECIPE_PUBLISHING_PHASE3_ENABLED?.trim().toLowerCase() !== "false";

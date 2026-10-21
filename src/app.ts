@@ -8,6 +8,7 @@ import { errorSchema } from './contracts/common.js';
 import type { ApiEnvironment } from './contracts/common.js';
 import { ApiError } from './errors.js';
 import { authMiddleware, createTokenVerifier } from './middleware/auth.js';
+import { withProfiles } from './services/profiles.js';
 import type { VerifyToken } from './middleware/auth.js';
 import { registerBrands } from './routes/v1/brands.js';
 import { registerFoods } from './routes/v1/foods.js';
@@ -32,7 +33,7 @@ import { createHearkenService } from './hearken/service.js';
 import type { HearkenService } from './hearken/service.js';
 import { createDatabase } from './hearken/db.js';
 import { createApnsSender } from './integrations/apns.js';
-import { appAccess, effectiveEntitlements } from './bigtable/lib/entitlements.js';
+import { appAccess, effectiveEntitlements } from './services/subscriptions.js';
 import { createEntitlementGate, loadEntitlements } from './services/entitlements.js';
 import type { EntitlementSource } from './services/entitlements.js';
 import type { Sql } from 'postgres';
@@ -42,7 +43,7 @@ import { registerReports } from './routes/v1/reports.js';
 import { registerAccount } from './routes/v1/account.js';
 import { setAccountDeletionDependencies } from './services/account-deletion.js';
 import { requireCronSecret } from './middleware/cron.js';
-import { supabaseAdmin } from './bigtable/lib/supabase.js';
+import { supabaseAdmin } from './services/supabase.js';
 
 export type AppOptions = {
   config?: Config;
@@ -147,7 +148,8 @@ export function createApp(options: AppOptions = {}) {
   app.openAPIRegistry.registerComponent('securitySchemes', 'BearerAuth', {
     type: 'http', scheme: 'bearer', bearerFormat: 'JWT',
   });
-  const verifyToken = options.verifyToken ?? createTokenVerifier(config);
+  // The real verifier also gives every signed-in account a profile row (tests pass their own).
+  const verifyToken = options.verifyToken ?? withProfiles(createTokenVerifier(config));
   // Every /v1 route requires a bearer token up front, except BigTable's (/v1/bigtable/*),
   // which authenticate inside their handlers because a few of them are public.
   const requireAuth = authMiddleware(verifyToken);

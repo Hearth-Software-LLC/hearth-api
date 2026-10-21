@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
-import type { SubscriptionTier } from "./rate-limit.js";
+import type { SubscriptionTier } from "../bigtable/lib/rate-limit.js";
 
 type RevenueCatEventPayload = {
   id?: string;

@@ -11,10 +11,10 @@ const supabaseAdmin = vi.hoisted(() => ({
   from: (table: string) => fake.client.from(table),
   rpc: (fn: string, args: Record<string, unknown>) => fake.client.rpc(fn, args),
 }));
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({ supabaseAdmin }));
+vi.mock("../../src/services/supabase.js", () => ({ supabaseAdmin }));
 
 import { POST } from "../../src/bigtable/routes/webhooks.revenuecat.js";
-import { resetRevenueCatEntitlementCache } from "../../src/bigtable/lib/revenuecat-entitlements.js";
+import { resetRevenueCatEntitlementCache } from "../../src/services/revenuecat-entitlements.js";
 
 let stored: Record<string, unknown> | null = null;
 

@@ -5,7 +5,7 @@ import { NextResponse } from "../next-shim.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { getMembershipContext } from "../lib/household.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 // A household's join code: the organizer shares it (link or QR) and whoever enters it joins the
 // household and shares the organizer's subscription. Replaces the invitation flow for new builds.

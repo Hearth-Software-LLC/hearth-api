@@ -18,12 +18,12 @@ vi.mock("../../src/bigtable/lib/household.js", () => ({
   getMembershipContext,
 }));
 
-vi.mock("../../src/bigtable/lib/revenuecat.js", () => ({
+vi.mock("../../src/services/revenuecat.js", () => ({
   ensureRevenueCatSubscriber: vi.fn(),
   deleteRevenueCatSubscriber: vi.fn(),
 }));
 
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({
+vi.mock("../../src/services/supabase.js", () => ({
   supabaseAdmin,
 }));
 

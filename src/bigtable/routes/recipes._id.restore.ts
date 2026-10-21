@@ -2,7 +2,7 @@ import { NextResponse } from "../next-shim.js";
 
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   const userId = await getUserIdFromAuthHeader(request.headers.get("authorization"));

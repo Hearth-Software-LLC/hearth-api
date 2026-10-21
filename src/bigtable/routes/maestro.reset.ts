@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "../next-shim.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 import { serverError } from "../lib/server-error.js";
 
 type ResetPayload = {

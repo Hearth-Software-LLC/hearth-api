@@ -3,7 +3,7 @@ import { NextResponse } from "../next-shim.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { insertNotification } from "../lib/notifications.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 function extractDisplayName(profile: { household_name?: string | null } | null | undefined, fallback = "User") {
   const name = typeof profile?.household_name === "string" ? profile.household_name.trim() : "";

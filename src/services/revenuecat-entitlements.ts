@@ -1,5 +1,5 @@
-import { laterExpiry, normalizeEntitlementKey } from "./entitlements.js";
-import type { EntitlementMap } from "./entitlements.js";
+import { laterExpiry, normalizeEntitlementKey } from "./subscriptions.js";
+import type { EntitlementMap } from "./subscriptions.js";
 
 // Reads a customer's active entitlements from RevenueCat's REST API v2, so the webhook can store
 // the whole picture rather than replaying one event. Needs REVENUECAT_SECRET_API_KEY (a v2

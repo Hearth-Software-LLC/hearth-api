@@ -4,7 +4,7 @@ import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { insertNotification } from "../lib/notifications.js";
 import { getUsageStatus } from "../lib/rate-limit.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 type PermissionsBody = {
   canManageMealPlan?: boolean;

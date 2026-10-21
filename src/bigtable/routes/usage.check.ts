@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "../next-shim.js";
 
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { getUsageStatus } from "../lib/rate-limit.js";
-import { ensureRevenueCatSubscriber } from "../lib/revenuecat.js";
+import { ensureRevenueCatSubscriber } from "../../services/revenuecat.js";
 import { serverError } from "../lib/server-error.js";
 import { createTtlCache } from "../lib/ttl-cache.js";
 

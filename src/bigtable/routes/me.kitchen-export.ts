@@ -5,7 +5,7 @@ import { getMembershipContext } from "../lib/household.js";
 import { toMemberAvatarPublicUrl } from "../lib/member-avatar.js";
 import { loadPublicDisplayName } from "../lib/public-identity.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 import { loadGrocerySnapshotsPayload } from "./grocery.snapshots.js";
 import { buildPlanResponseForPlan } from "./plans.current.js";
 import { toCustomTagDto, type CustomTagRow } from "./recipes.tags.js";

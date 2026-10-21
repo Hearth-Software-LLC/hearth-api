@@ -14,7 +14,7 @@ const supabaseAdmin = {
 
 vi.mock("../../src/bigtable/lib/auth.js", () => ({ getUserIdFromAuthHeader }));
 vi.mock("../../src/bigtable/lib/notifications.js", () => ({ fanOutRecipePublishNotification }));
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({ supabaseAdmin }));
+vi.mock("../../src/services/supabase.js", () => ({ supabaseAdmin }));
 
 const RECIPE_ID = "6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
 

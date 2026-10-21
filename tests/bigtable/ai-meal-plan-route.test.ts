@@ -35,7 +35,7 @@ vi.mock("../../src/bigtable/lib/ai-meal-plan.js", () => ({
   buildMealPlan,
 }));
 
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({
+vi.mock("../../src/services/supabase.js", () => ({
   supabaseAdmin,
 }));
 

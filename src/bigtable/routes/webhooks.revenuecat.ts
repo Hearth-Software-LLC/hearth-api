@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "../next-shim.js";
 
-import { applyEventToEntitlements, parseEntitlementMap, tierFromEntitlements } from "../lib/entitlements.js";
-import type { EntitlementMap } from "../lib/entitlements.js";
-import { extractRevenueCatEvent, verifyRevenueCatAuthorizationHeader } from "../lib/revenuecat.js";
-import { fetchRevenueCatEntitlements } from "../lib/revenuecat-entitlements.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { applyEventToEntitlements, parseEntitlementMap, tierFromEntitlements } from "../../services/subscriptions.js";
+import type { EntitlementMap } from "../../services/subscriptions.js";
+import { extractRevenueCatEvent, verifyRevenueCatAuthorizationHeader } from "../../services/revenuecat.js";
+import { fetchRevenueCatEntitlements } from "../../services/revenuecat-entitlements.js";
+import { ensureProfileForAccount } from "../../services/profiles.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 import { serverError } from "../lib/server-error.js";
 
 export async function POST(request: NextRequest) {
@@ -58,11 +59,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true, duplicate: true }, { status: 200 });
   }
 
-  const profileLookup = await supabaseAdmin
+  let profileLookup = await supabaseAdmin
     .from("profiles")
     .select("id")
     .eq("id", event.app_user_id)
     .maybeSingle();
+
+  // A Hearth account that never saved a profile (it signed in from an app other than BigTable)
+  // still gets its plans recorded: create the profile, then look again.
+  if (!profileLookup.error && !profileLookup.data && (await ensureProfileForAccount(event.app_user_id))) {
+    profileLookup = await supabaseAdmin
+      .from("profiles")
+      .select("id")
+      .eq("id", event.app_user_id)
+      .maybeSingle();
+  }
 
   if (profileLookup.error) {
     return serverError(

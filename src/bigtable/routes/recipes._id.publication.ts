@@ -4,7 +4,7 @@ import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { fanOutRecipePublishNotification } from "../lib/notifications.js";
 import { parseRecipeVersionContent, type VersionedRecipeContent } from "../lib/recipe-versioning.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 import { normalizeCreatePayload, type CreateRecipePayload } from "./recipes.js";
 
 // Publishing by id, for builds that keep private recipes in the family's iCloud. The client owns

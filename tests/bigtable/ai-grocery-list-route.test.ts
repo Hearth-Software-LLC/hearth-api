@@ -41,7 +41,7 @@ vi.mock("../../src/bigtable/lib/ai-grocery-list.js", () => ({
   GroceryListGenerationError,
 }));
 
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({
+vi.mock("../../src/services/supabase.js", () => ({
   supabaseAdmin,
 }));
 

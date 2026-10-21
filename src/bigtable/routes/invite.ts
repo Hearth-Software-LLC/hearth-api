@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "../next-shim.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 import { serverError } from "../lib/server-error.js";
 
 export const dynamic = "force-dynamic";

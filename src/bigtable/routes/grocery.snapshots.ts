@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "../next-shim.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { getMembershipContext } from "../lib/household.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 type GrocerySource = "anthropic" | "fallback" | "manual";
 

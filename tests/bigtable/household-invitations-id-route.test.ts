@@ -24,7 +24,7 @@ vi.mock("../../src/bigtable/lib/notifications.js", () => ({
   insertNotification,
 }));
 
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({
+vi.mock("../../src/services/supabase.js", () => ({
   supabaseAdmin,
 }));
 

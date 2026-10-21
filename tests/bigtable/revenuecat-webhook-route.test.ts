@@ -15,17 +15,17 @@ const supabaseAdmin = {
   from: fromMock,
 };
 
-vi.mock("../../src/bigtable/lib/revenuecat.js", () => ({
+vi.mock("../../src/services/revenuecat.js", () => ({
   verifyRevenueCatAuthorizationHeader,
   extractRevenueCatEvent,
   deriveTierFromRevenueCat,
 }));
 
-vi.mock("../../src/bigtable/lib/revenuecat-entitlements.js", () => ({
+vi.mock("../../src/services/revenuecat-entitlements.js", () => ({
   fetchRevenueCatEntitlements,
 }));
 
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({
+vi.mock("../../src/services/supabase.js", () => ({
   supabaseAdmin,
 }));
 

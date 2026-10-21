@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fromMock = vi.fn();
 
-vi.mock('../../src/bigtable/lib/supabase.js', () => ({
+vi.mock('../../src/services/supabase.js', () => ({
   supabaseAdmin: { from: fromMock },
 }));
 

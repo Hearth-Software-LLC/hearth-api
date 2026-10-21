@@ -22,7 +22,7 @@ const supabaseAdmin = {
 vi.mock("../../src/bigtable/lib/auth.js", () => ({ getUserIdFromAuthHeader }));
 vi.mock("../../src/bigtable/lib/rate-limit.js", () => ({ getUsageStatus, incrementUsageBy, canConsumeCredits }));
 vi.mock("../../src/bigtable/lib/ai-grocery-list.js", () => ({ buildGroceryList, GroceryListGenerationError }));
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({ supabaseAdmin }));
+vi.mock("../../src/services/supabase.js", () => ({ supabaseAdmin }));
 
 function respond(call: QueryCall): QueryResult | undefined {
   if (call.table === "household_memberships") {

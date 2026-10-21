@@ -8,7 +8,7 @@ const supabaseAdmin = {
   rpc: (fn: string, args: Record<string, unknown>) => fake.client.rpc(fn, args),
 };
 
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({ supabaseAdmin }));
+vi.mock("../../src/services/supabase.js", () => ({ supabaseAdmin }));
 
 let tiers: Record<string, string> = {};
 let organizerOf: Record<string, string> = {};

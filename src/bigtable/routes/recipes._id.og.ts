@@ -1,5 +1,5 @@
 import { NextResponse } from "../next-shim.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 // Public endpoint — no auth required. Only returns data for published recipes.
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {

@@ -1,6 +1,6 @@
 import { NextResponse } from "../next-shim.js";
 
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 export async function GET() {
   const missingDependencies = [] as string[];

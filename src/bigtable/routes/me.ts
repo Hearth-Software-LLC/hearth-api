@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "../next-shim.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { getMembershipContext } from "../lib/household.js";
-import { ensureRevenueCatSubscriber } from "../lib/revenuecat.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { ensureRevenueCatSubscriber } from "../../services/revenuecat.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 import { serverError } from "../lib/server-error.js";
 import { ApiError } from "../../errors.js";
 import { AccountDeletionError, deleteHearthAccount } from "../../services/account-deletion.js";

@@ -4,7 +4,7 @@ import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { insertNotification } from "../lib/notifications.js";
 import { loadPublicDisplayName } from "../lib/public-identity.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 // Joining a household with its join code. Creates the same membership the invitation-accept path
 // does (via the bigtable_join_household SQL helper, the invitation-free twin of

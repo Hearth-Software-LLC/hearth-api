@@ -5,7 +5,7 @@ const supabaseAdmin = {
   from: fromMock,
 };
 
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({
+vi.mock("../../src/services/supabase.js", () => ({
   supabaseAdmin,
 }));
 

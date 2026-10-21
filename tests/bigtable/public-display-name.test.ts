@@ -11,7 +11,7 @@ const supabaseAdmin = {
 };
 
 vi.mock("../../src/bigtable/lib/auth.js", () => ({ getUserIdFromAuthHeader }));
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({ supabaseAdmin }));
+vi.mock("../../src/services/supabase.js", () => ({ supabaseAdmin }));
 
 let displayNameRows: Array<{ id: string; display_name: string | null }> = [];
 let displayNameError: { message: string } | null = null;

@@ -20,7 +20,7 @@ const mocks = vi.hoisted(() => ({
   state: { managesMembers: false, organizerId: null as string | null, tier: 'free' },
 }));
 
-vi.mock('../src/bigtable/lib/supabase.js', () => ({
+vi.mock('../src/services/supabase.js', () => ({
   supabaseAdmin: {
     from: mocks.from,
     rpc: mocks.rpc,
@@ -28,7 +28,7 @@ vi.mock('../src/bigtable/lib/supabase.js', () => ({
     auth: { admin: { deleteUser: mocks.deleteUser } },
   },
 }));
-vi.mock('../src/bigtable/lib/revenuecat.js', () => ({
+vi.mock('../src/services/revenuecat.js', () => ({
   deleteRevenueCatSubscriber: mocks.deleteRevenueCatSubscriber,
   ensureRevenueCatSubscriber: vi.fn(),
 }));

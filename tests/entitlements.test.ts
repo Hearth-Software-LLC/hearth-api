@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { readConfig } from '../src/config.js';
-import type { EffectiveEntitlement } from '../src/bigtable/lib/entitlements.js';
+import type { EffectiveEntitlement } from '../src/services/subscriptions.js';
 import type { HearkenService } from '../src/hearken/service.js';
 import type { ReserveQuota } from '../src/services/quota.js';
 

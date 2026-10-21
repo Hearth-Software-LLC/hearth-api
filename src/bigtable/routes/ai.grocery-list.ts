@@ -12,7 +12,7 @@ import {
 import { getMembershipContext } from "../lib/household.js";
 import { DAYS, SLOTS } from "../lib/planner-contract.js";
 import { canConsumeCredits, getUsageStatus, incrementUsageBy } from "../lib/rate-limit.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 type GroceryRequest = {
   costcoMode?: boolean;

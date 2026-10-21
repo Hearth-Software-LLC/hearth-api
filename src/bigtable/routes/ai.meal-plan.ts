@@ -20,7 +20,7 @@ import {
   type RecipeMix,
   type RecipeMixBucket,
 } from "../lib/recipe-mix.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 type RecipeCandidateRow = {
   title: string;

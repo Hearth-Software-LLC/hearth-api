@@ -9,7 +9,7 @@ const supabaseAdmin = vi.hoisted(() => ({
   rpc: (fn: string, args: Record<string, unknown>) => fake.client.rpc(fn, args),
 }));
 
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({ supabaseAdmin }));
+vi.mock("../../src/services/supabase.js", () => ({ supabaseAdmin }));
 
 import {
   activeEntitlements,
@@ -19,7 +19,7 @@ import {
   hasAppAccess,
   normalizeEntitlementKey,
   tierFromEntitlements,
-} from "../../src/bigtable/lib/entitlements.js";
+} from "../../src/services/subscriptions.js";
 
 const now = new Date("2026-10-19T12:00:00Z");
 const future = "2026-11-19T12:00:00.000Z";

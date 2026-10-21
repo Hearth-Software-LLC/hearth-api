@@ -1,5 +1,5 @@
-import { householdOrganizerOf, subscriptionGrantsPro } from "./entitlements.js";
-import { supabaseAdmin } from "./supabase.js";
+import { householdOrganizerOf, subscriptionGrantsPro } from "../../services/subscriptions.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 type AiUsageRow = {
   id: string;

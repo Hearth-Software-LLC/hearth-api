@@ -18,7 +18,7 @@ const supabaseAdmin = {
 vi.mock("../../src/bigtable/lib/auth.js", () => ({ getUserIdFromAuthHeader }));
 vi.mock("../../src/bigtable/lib/rate-limit.js", () => ({ getUsageStatus, incrementUsageBy, canConsumeCredits }));
 vi.mock("../../src/bigtable/lib/ai-meal-plan.js", () => ({ buildMealPlan }));
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({ supabaseAdmin }));
+vi.mock("../../src/services/supabase.js", () => ({ supabaseAdmin }));
 
 const DAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"] as const;
 

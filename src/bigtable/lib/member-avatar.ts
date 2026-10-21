@@ -1,4 +1,4 @@
-import { supabaseAdmin } from "./supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 const MEMBER_AVATAR_STORAGE_PREFIX = "/storage/v1/object/public/member-avatars/";
 

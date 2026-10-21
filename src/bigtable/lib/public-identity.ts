@@ -1,4 +1,4 @@
-import { supabaseAdmin } from "./supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 export const MAX_DISPLAY_NAME_LENGTH = 60;
 

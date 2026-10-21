@@ -3,7 +3,7 @@ import { NextResponse } from "../next-shim.js";
 import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { normalizeDisplayName } from "../lib/public-identity.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 // The name the community sees on a cook's recipes and profile. With the family's members moving
 // to iCloud, this replaces "the organizer's first household member" as the public name.

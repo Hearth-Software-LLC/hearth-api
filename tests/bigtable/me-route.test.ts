@@ -16,11 +16,11 @@ vi.mock("../../src/bigtable/lib/auth.js", () => ({
   getUserIdFromAuthHeader,
 }));
 
-vi.mock("../../src/bigtable/lib/supabase.js", () => ({
+vi.mock("../../src/services/supabase.js", () => ({
   supabaseAdmin,
 }));
 
-vi.mock("../../src/bigtable/lib/revenuecat.js", () => ({
+vi.mock("../../src/services/revenuecat.js", () => ({
   ensureRevenueCatSubscriber: vi.fn(),
   deleteRevenueCatSubscriber: vi.fn(),
 }));

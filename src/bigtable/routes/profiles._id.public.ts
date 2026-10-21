@@ -4,7 +4,7 @@ import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { toMemberAvatarPublicUrl } from "../lib/member-avatar.js";
 import { loadPublicDisplayName } from "../lib/public-identity.js";
 import { serverError } from "../lib/server-error.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   const userId = await getUserIdFromAuthHeader(request.headers.get("authorization"));

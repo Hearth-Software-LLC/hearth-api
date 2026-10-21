@@ -4,7 +4,7 @@ import { getUserIdFromAuthHeader } from "../lib/auth.js";
 import { toMemberAvatarPublicUrl } from "../lib/member-avatar.js";
 import { loadPublicDisplayNames } from "../lib/public-identity.js";
 import { parseRecipeVersionContent } from "../lib/recipe-versioning.js";
-import { supabaseAdmin } from "../lib/supabase.js";
+import { supabaseAdmin } from "../../services/supabase.js";
 import { serverError } from "../lib/server-error.js";
 
 type RecipeIngredientDto = {
