@@ -140,6 +140,12 @@ describe("DELETE /api/me", () => {
       if (table === "push_tokens") {
         return { delete: vi.fn(() => ({ eq: deletePushTokensMock })) };
       }
+      if (table === "recipes" || table === "notifications" || table === "revenuecat_webhook_events") {
+        return {
+          delete: vi.fn(() => ({ eq: vi.fn(() => ({ neq: vi.fn(async () => ({ error: null })) })) })),
+          update: vi.fn(() => ({ eq: vi.fn(async () => ({ error: null })) })),
+        };
+      }
       throw new Error(`Unexpected table: ${table}`);
     });
     deletePushTokensMock.mockResolvedValue({ error: null });

@@ -41,6 +41,8 @@ import { createReportStore } from './services/reports.js';
 import type { ReportStore } from './services/reports.js';
 import { registerReports } from './routes/v1/reports.js';
 import { registerAccount } from './routes/v1/account.js';
+import { registerEmber } from './ember/routes.js';
+import type { EmberDependencies } from './ember/routes.js';
 import { setAccountDeletionDependencies } from './services/account-deletion.js';
 import { requireCronSecret } from './middleware/cron.js';
 import { supabaseAdmin } from './services/supabase.js';
@@ -67,6 +69,8 @@ export type AppOptions = {
    * Calls `bigtable_purge_moved_kitchens()` with the Supabase secret key when not given.
    */
   purgeMovedKitchens?: () => Promise<number>;
+  /** Ember's cloud turn (POST /v1/ember/turn). Reads ANTHROPIC_API_KEY when not given. */
+  ember?: Partial<EmberDependencies>;
 };
 
 type RequestLog = {
@@ -235,6 +239,17 @@ export function createApp(options: AppOptions = {}) {
   const database = databaseFromConfig(config);
   const reports = options.reports ?? (database ? createReportStore(database) : undefined);
   registerReports(app, reports);
+
+  // Ember's cloud turn: a stateless, de-identified relay to Claude (src/ember).
+  registerEmber(app, {
+    reserveQuota,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY?.trim() || undefined,
+    fetcher: options.fetcher ?? fetch,
+    ...(process.env.EMBER_MODEL_QUICK && process.env.EMBER_MODEL_PLAN
+      ? { models: { quick: process.env.EMBER_MODEL_QUICK.trim(), plan: process.env.EMBER_MODEL_PLAN.trim() } }
+      : {}),
+    ...options.ember,
+  });
 
   // DELETE /v1/me and DELETE /v1/bigtable/me share one deletion, which needs these.
   setAccountDeletionDependencies({ plaidClient: plaidDataClient, connections: connectionStore, seal: tokenSeal, hearken, reports });

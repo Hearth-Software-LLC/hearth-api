@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   deleteRevenueCatSubscriber: vi.fn(),
   insertNotification: vi.fn(),
   deletePushTokens: vi.fn(),
+  detach: vi.fn(),
   state: { managesMembers: false, organizerId: null as string | null, tier: 'free' },
 }));
 
@@ -52,6 +53,12 @@ function table(name: string) {
   }
   if (name === 'push_tokens') {
     return { delete: () => ({ eq: mocks.deletePushTokens }) };
+  }
+  if (name === 'recipes' || name === 'notifications' || name === 'revenuecat_webhook_events') {
+    return {
+      delete: () => ({ eq: (column: string, value: string) => ({ neq: async (...rest: string[]) => { mocks.detach(name, 'delete', column, value, ...rest); return { error: null }; } }) }),
+      update: (values: Record<string, unknown>) => ({ eq: async (column: string, value: string) => { mocks.detach(name, 'update', column, value, values); return { error: null }; } }),
+    };
   }
   throw new Error(`Unexpected table: ${name}`);
 }
@@ -114,6 +121,17 @@ describe('DELETE /v1/me', () => {
     expect(mocks.deletePushTokens).toHaveBeenCalledWith('profile_id', 'user-1');
     expect(mocks.deleteUser).toHaveBeenCalledWith('user-1');
     expect(mocks.deleteUser.mock.invocationCallOrder[0]).toBeGreaterThan(removeItem.mock.invocationCallOrder[1]!);
+  });
+
+  it('removes draft recipes and detaches SET NULL rows before deleting the auth user', async () => {
+    const { call } = setup();
+    expect((await call()).status).toBe(204);
+    expect(mocks.detach).toHaveBeenCalledWith('recipes', 'delete', 'created_by_profile_id', 'user-1', 'status', 'published');
+    expect(mocks.detach).toHaveBeenCalledWith('recipes', 'update', 'created_by_profile_id', 'user-1', { created_by_profile_id: null });
+    expect(mocks.detach).toHaveBeenCalledWith('notifications', 'update', 'actor_profile_id', 'user-1', { actor_profile_id: null });
+    expect(mocks.detach).toHaveBeenCalledWith('revenuecat_webhook_events', 'update', 'profile_id', 'user-1', { profile_id: null });
+    const lastDetach = Math.max(...mocks.detach.mock.invocationCallOrder);
+    expect(mocks.deleteUser.mock.invocationCallOrder[0]).toBeGreaterThan(lastDetach);
   });
 
   it('refuses while the caller runs a household with other people, deleting nothing', async () => {

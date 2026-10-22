@@ -121,6 +121,25 @@ async function removeBankConnections(userId: string) {
   }
 }
 
+async function detachSetNullRows(userId: string) {
+  const drafts = await supabaseAdmin
+    .from('recipes')
+    .delete()
+    .eq('created_by_profile_id', userId)
+    .neq('status', 'published');
+  if (drafts.error) throw drafts.error;
+
+  const steps = [
+    supabaseAdmin.from('recipes').update({ created_by_profile_id: null }).eq('created_by_profile_id', userId),
+    supabaseAdmin.from('notifications').update({ actor_profile_id: null }).eq('actor_profile_id', userId),
+    supabaseAdmin.from('revenuecat_webhook_events').update({ profile_id: null }).eq('profile_id', userId),
+  ];
+  for (const step of steps) {
+    const { error } = await step;
+    if (error) throw error;
+  }
+}
+
 function revenueCatConfigured() {
   return Boolean(process.env.REVENUECAT_SECRET_API_KEY?.trim() && process.env.REVENUECAT_PROJECT_ID?.trim());
 }
@@ -205,7 +224,17 @@ export async function deleteHearthAccount(userId: string, options: DeleteAccount
     throw new AccountDeletionError('delete push tokens', 'Failed to delete account', pushTokensResult.error);
   }
 
-  // 7. A household member leaving tells the organizer, then the auth user goes.
+  // 7. Rows whose foreign key to the profile is ON DELETE SET NULL. Auth's own database role can't
+  // run those updates during the cascade ("permission denied for table recipes"), so the service
+  // role does them first and the cascade below only deletes. Unpublished recipes go; published
+  // ones stay for the people who saved them, without the author (as the privacy policy says).
+  try {
+    await detachSetNullRows(userId);
+  } catch (error) {
+    throw new AccountDeletionError('detach recipes', 'Failed to delete account', error);
+  }
+
+  // 8. A household member leaving tells the organizer, then the auth user goes.
   if (membershipResult.data?.organizer_id) {
     const profileResult = await supabaseAdmin
       .from('profiles')
