@@ -108,6 +108,40 @@ describe('POST /v1/ember/turn', () => {
     expect(response.status).toBe(422);
   });
 
+  it('offers place_call and tells Claude to use the tool that does the thing', () => {
+    const payload = anthropicPayload({ ...baseTurn, tools: ['place_call'] }, 'm');
+    expect(payload.tools.map((tool: { name?: string }) => tool.name)).toEqual(['place_call']);
+    expect(JSON.stringify(payload.system)).toContain('Use the tool that does the thing');
+    expect(JSON.stringify(payload.system)).toContain('wait for the person to confirm');
+  });
+
+  const spendingDef = {
+    name: 'spending',
+    description: 'How much was spent in a period.',
+    input_schema: { type: 'object', properties: { range: { type: 'string', description: 'When' } }, required: [] },
+  };
+
+  it("uses the device's tool definitions for allowlisted names", () => {
+    const payload = anthropicPayload({ ...baseTurn, tools: ['spending', 'meal_times'], toolDefs: [spendingDef] } as never, 'm');
+    expect(payload.tools.map((tool: { name?: string }) => tool.name)).toEqual(['spending', 'meal_times']);
+    expect(payload.tools[0]).toMatchObject({ description: 'How much was spent in a period.' });
+  });
+
+  it('drops an allowlisted name the device sent no definition for and the server has none for', () => {
+    const payload = anthropicPayload({ ...baseTurn, tools: ['spending'] }, 'm');
+    expect(payload.tools).toEqual([]);
+  });
+
+  it('refuses tool definitions for names off the allowlist, or with odd schemas', async () => {
+    const { app } = setup(vi.fn<typeof fetch>());
+    const offList = await app.request('/v1/ember/turn', { method: 'POST', headers: json,
+      body: JSON.stringify({ ...baseTurn, tools: ['spending'], toolDefs: [{ ...spendingDef, name: 'read_messages' }] }) });
+    expect(offList.status).toBe(400);
+    const nested = await app.request('/v1/ember/turn', { method: 'POST', headers: json,
+      body: JSON.stringify({ ...baseTurn, tools: ['spending'], toolDefs: [{ ...spendingDef, input_schema: { type: 'object', properties: { range: { type: 'object' } }, required: [] } }] }) });
+    expect(nested.status).toBe(400);
+  });
+
   it('rejects tools the server does not know and names in the roster', async () => {
     const { app } = setup(vi.fn<typeof fetch>());
     const unknownTool = await app.request('/v1/ember/turn', { method: 'POST', headers: json, body: JSON.stringify({ ...baseTurn, tools: ['read_messages'] }) });

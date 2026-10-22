@@ -5,15 +5,15 @@ import { errorSchema } from '../contracts/common.js';
 import type { ApiEnvironment } from '../contracts/common.js';
 import { ApiError } from '../errors.js';
 import type { ReserveQuota } from '../services/quota.js';
-import { EMBER_TOOLS, EMBER_TOOL_NAMES } from './tools.js';
+import { EMBER_TOOLS, EMBER_TOOL_NAMES, MAX_TOOLS } from './tools.js';
 import { findIdentifiers } from './privacy.js';
 import { emberSystemPrompt } from './prompt.js';
 
 // POST /v1/ember/turn — Ember's cloud turn (implementation plan › hearth-api changes).
 //
-// A stateless relay. The device sends a de-identified conversation and the names of the tools it
-// will run; this adds the system prompt and the tool schemas, checks the text once more for
-// identifiers, and streams Claude's reply back as Server-Sent Events:
+// A stateless relay. The device sends a de-identified conversation and the tools it will run (names
+// on the allowlist, with their definitions); this adds the system prompt, checks the text once
+// more for identifiers, and streams Claude's reply back as Server-Sent Events:
 //
 //   event: text      data: {"text":"…"}
 //   event: tool_use  data: {"id":"…","name":"…","input":{…}}   (the device runs it, then calls again)
@@ -53,6 +53,22 @@ const blockSchema = z.discriminatedUnion('type', [
   }),
 ]);
 
+const propertySchema = z.object({
+  type: z.enum(['string', 'number', 'boolean']),
+  description: z.string().max(400).optional(),
+  enum: z.array(z.string().max(60)).max(20).optional(),
+});
+
+const toolDefinitionSchema = z.object({
+  name: z.enum(EMBER_TOOL_NAMES),
+  description: z.string().min(1).max(800),
+  input_schema: z.object({
+    type: z.literal('object'),
+    properties: z.record(z.string().regex(/^[a-z_]{1,32}$/), propertySchema).refine((value) => Object.keys(value).length <= 8, 'Too many parameters'),
+    required: z.array(z.string().regex(/^[a-z_]{1,32}$/)).max(8),
+  }),
+});
+
 export const emberTurnSchema = z.object({
   profile: z.enum(['quick', 'plan']),
   client: z.enum(['iphone', 'watch']),
@@ -68,7 +84,9 @@ export const emberTurnSchema = z.object({
     role: z.enum(['user', 'assistant']),
     content: z.array(blockSchema).min(1).max(20),
   })).min(1).max(30),
-  tools: z.array(z.enum(EMBER_TOOL_NAMES)).max(EMBER_TOOL_NAMES.length),
+  tools: z.array(z.enum(EMBER_TOOL_NAMES)).max(MAX_TOOLS),
+  /** The tools' definitions, from the device. Every name must be on the allowlist and offered in `tools`. */
+  toolDefs: z.array(toolDefinitionSchema).max(MAX_TOOLS).optional(),
   allowWebSearch: z.boolean(),
 }).openapi('EmberTurn');
 
@@ -219,10 +237,12 @@ export function conversationText(turn: EmberTurn): string {
 
 /** The Messages API request: cached system prompt and tools, no identity, no metadata. */
 export function anthropicPayload(turn: EmberTurn, model: string) {
+  // The device's definition when it sent one, else the one here; a name with neither is dropped.
+  const sent = new Map((turn.toolDefs ?? []).map((tool) => [tool.name, tool]));
   const tools: Array<Record<string, unknown>> = turn.tools
-    .map((name) => EMBER_TOOLS[name])
+    .map((name) => sent.get(name) ?? EMBER_TOOLS[name])
     .filter((tool): tool is NonNullable<typeof tool> => Boolean(tool))
-    .map((tool) => ({ ...tool }));
+    .map((tool) => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema }));
   if (turn.allowWebSearch) tools.push({ type: 'web_search_20250305', name: 'web_search', max_uses: 2 });
   const last = tools.at(-1);
   if (last) last.cache_control = { type: 'ephemeral' };
