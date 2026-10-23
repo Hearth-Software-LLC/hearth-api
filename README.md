@@ -143,11 +143,11 @@ Uncomment and replace the relevant settings in `.env`. Never commit it or put se
 | `SUPABASE_URL` | Hearth Supabase project URL (BigTable data, bank connections) |
 | `SUPABASE_SECRET_KEY` | Server-only Supabase secret key for that project |
 | `PLAID_TOKEN_KEY` | 32-byte base64 key that seals Plaid access tokens |
-| `ANTHROPIC_API_KEY` | BigTable AI meal plans, grocery lists and recipe import |
+| `ANTHROPIC_API_KEY` | BigTable AI meal plans, grocery lists and recipe import; Ember's cloud turn (`/v1/ember/turn`) and cloud understanding (`/v1/ember/understand`) |
 | `OPENAI_API_KEY` | BigTable recipe audio transcription |
 | `GEMINI_API_KEY` | BigTable generated recipe images |
 | `GOOGLE_PLACES_API_KEY` | BigTable dine-out place search |
-| `GOOGLE_TTS_API_KEY` | Ember's cloud voice on Apple Watch (`/v1/ember/speak`, Google Cloud Text-to-Speech) |
+| `GOOGLE_TTS_API_KEY` | Ember on Apple Watch: the cloud voice (`/v1/ember/speak`, Google Cloud Text-to-Speech) and listening (`/v1/ember/transcribe`, Google Cloud Speech-to-Text; enable that API on the same key) |
 | `REVENUECAT_WEBHOOK_SECRET` | Shared secret RevenueCat sends to `/webhooks/revenuecat` |
 | `REVENUECAT_SECRET_API_KEY`, `REVENUECAT_PROJECT_ID` | RevenueCat REST v2 access: subscriber sync, account deletion, and the webhook's entitlement refresh (needs read access to customers and entitlements) |
 | `ENFORCE_ENTITLEMENTS` | `true` makes Plaid (Suffice), restaurant menus (Sated) and creating/joining study groups (Hearken) answer `402 ENTITLEMENT_REQUIRED` without the app's plan or Hearth+; default `false` |

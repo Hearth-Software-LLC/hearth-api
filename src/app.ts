@@ -44,6 +44,10 @@ import { registerAccount } from './routes/v1/account.js';
 import { registerEmber } from './ember/routes.js';
 import type { EmberDependencies } from './ember/routes.js';
 import { registerEmberSpeech } from './ember/speech.js';
+import { registerEmberUnderstand } from './ember/understand.js';
+import { registerEmberTranscribe } from './ember/transcribe.js';
+import type { EmberTranscribeDependencies } from './ember/transcribe.js';
+import type { EmberUnderstandDependencies } from './ember/understand.js';
 import type { EmberSpeechDependencies } from './ember/speech.js';
 import { setAccountDeletionDependencies } from './services/account-deletion.js';
 import { requireCronSecret } from './middleware/cron.js';
@@ -74,6 +78,10 @@ export type AppOptions = {
   /** Ember's cloud turn (POST /v1/ember/turn). Reads ANTHROPIC_API_KEY when not given. */
   ember?: Partial<EmberDependencies>;
   emberSpeech?: Partial<EmberSpeechDependencies>;
+  /** Ember's cloud understanding (POST /v1/ember/understand). Reads ANTHROPIC_API_KEY when not given. */
+  emberUnderstand?: Partial<EmberUnderstandDependencies>;
+  /** Speech-to-text for Ember on Apple Watch (POST /v1/ember/transcribe). Reads GOOGLE_TTS_API_KEY when not given. */
+  emberTranscribe?: Partial<EmberTranscribeDependencies>;
 };
 
 type RequestLog = {
@@ -252,6 +260,21 @@ export function createApp(options: AppOptions = {}) {
       ? { models: { quick: process.env.EMBER_MODEL_QUICK.trim(), plan: process.env.EMBER_MODEL_PLAN.trim() } }
       : {}),
     ...options.ember,
+  });
+  // What an Ember question asks for, as a typed request (Claude, forced tool call; no household data).
+  registerEmberUnderstand(app, {
+    reserveQuota,
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY?.trim() || undefined,
+    fetcher: options.fetcher ?? fetch,
+    ...(process.env.EMBER_MODEL_QUICK ? { model: process.env.EMBER_MODEL_QUICK.trim() } : {}),
+    ...options.emberUnderstand,
+  });
+  // What was said to Ember on Apple Watch (Google Cloud Speech-to-Text; watchOS has no speech recognition).
+  registerEmberTranscribe(app, {
+    reserveQuota,
+    googleApiKey: process.env.GOOGLE_TTS_API_KEY?.trim() || undefined,
+    fetcher: options.fetcher ?? fetch,
+    ...options.emberTranscribe,
   });
   // Ember's cloud voice for Apple Watch (Google Text-to-Speech, Chirp 3: HD).
   registerEmberSpeech(app, {
