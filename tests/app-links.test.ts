@@ -13,6 +13,9 @@ describe('Universal Links for the Plaid OAuth return', () => {
         details: [{
           appIDs: ['BH8R3BX5WF.com.stephenwarren.suffice'],
           components: [{ '/': '/plaid/*', comment: 'Plaid OAuth return' }],
+        }, {
+          appIDs: ['BH8R3BX5WF.com.stephenwarren.suffice'],
+          components: [{ '/': '/suffice/household/*', comment: 'Household invitations made in suffice' }],
         }],
       },
     });
@@ -39,5 +42,33 @@ describe('Universal Links for the Plaid OAuth return', () => {
       expect(response.headers.get('Content-Type')).toContain('text/html');
       expect(await response.text()).toContain('Go back to the app');
     }
+  });
+
+  it('opens each app\'s household invitations in that app', async () => {
+    const config = readConfig({ APPLE_APP_IDS: 'BH8R3BX5WF.com.stephenwarren.suffice,BH8R3BX5WF.com.stephenwarren.caloma' });
+    const response = await createApp({ config }).request('/.well-known/apple-app-site-association');
+    const body = await response.json() as { applinks: { details: { appIDs: string[]; components: { '/': string }[] }[] } };
+    const household = body.applinks.details.filter((detail) => detail.components[0]?.['/'].endsWith('/household/*'));
+    expect(household).toEqual([
+      { appIDs: ['BH8R3BX5WF.com.stephenwarren.suffice'], components: [{ '/': '/suffice/household/*', comment: 'Household invitations made in suffice' }] },
+      { appIDs: ['BH8R3BX5WF.com.stephenwarren.caloma'], components: [{ '/': '/caloma/household/*', comment: 'Household invitations made in caloma' }] },
+    ]);
+  });
+
+  it('passes a household invitation on to its iCloud link without the app', async () => {
+    const share = 'https://www.icloud.com/share/0abcDEF123#Household';
+    const response = await createApp().request(`/caloma/household/join?share=${encodeURIComponent(share)}`);
+    expect(response.status).toBe(200);
+    const page = await response.text();
+    expect(page).toContain('href="https://www.icloud.com/share/0abcDEF123#Household"');
+    expect(page).toContain('Without Caloma');
+  });
+
+  it('never links anywhere but iCloud', async () => {
+    const response = await createApp().request(`/caloma/household/join?share=${encodeURIComponent('https://evil.example/share/x')}`);
+    const page = await response.text();
+    expect(page).not.toContain('evil.example');
+    expect(page).toContain("isn't complete");
+    expect((await createApp().request('/notanapp/household/join')).status).toBe(404);
   });
 });

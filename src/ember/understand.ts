@@ -98,7 +98,7 @@ export const SUBMIT_TOOL = {
     type: 'object',
     properties: {
       intent: { type: 'string', enum: [...EMBER_INTENTS], description: 'What they want' },
-      whenWords: { type: 'string', description: 'The exact words they used for when, copied from the request ("on October 10", "last week"), or empty' },
+      whenWords: { type: 'string', description: 'The exact words they used for when, copied from the request ("on October 10", "last week")' },
       who: { type: 'string', description: 'The person, copied exactly ("Kristen", "Mom", "[P2]"), or empty. Empty for we, us, me or I.' },
       placeWords: { type: 'string', description: 'A store, payee or kind of place, copied exactly ("Costco", "Mexican food"); for a bill asked about by name, the bill\'s name; otherwise empty' },
       townWords: { type: 'string', description: 'A town or city, ONLY if they said one, copied exactly, or empty. Never fill in where they are.' },
@@ -108,7 +108,9 @@ export const SUBMIT_TOOL = {
       isFollowUp: { type: 'boolean', description: 'True only when the request leans on the previous one ("what about last week?")' },
       clarify: { type: 'string', description: 'One short question to ask back only when it is impossible to tell what they want; otherwise empty' },
     },
-    required: ['intent', 'whenWords', 'who', 'placeWords', 'townWords', 'budgetWords', 'items', 'amountWords', 'isFollowUp', 'clarify'],
+    // Only the intent is required: Claude leaves out what the request doesn't say, which keeps
+    // the reply short (writing all ten fields was most of this call's time).
+    required: ['intent'],
   },
 } as const;
 
@@ -122,7 +124,7 @@ export function understandSystemPrompt(input: { now: string; timeZone: string })
     '',
     'Rules:',
     '- Copy words exactly as they appear in the request. Never rephrase, never add words they did not say.',
-    '- Leave a field empty when the request does not say it.',
+    '- Leave out every field the request does not say. Most requests need only intent and one or two fields.',
     '- A person\'s name, a token like [P2], or a relation like Mom is "who", never a place.',
     '- Money questions about a specific day or period are "spending", or "transactions" when they want the list.',
     '- How a budget is doing is "budgetStatus" with the budget in budgetWords.',
