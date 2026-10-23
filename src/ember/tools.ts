@@ -126,6 +126,8 @@ export const EMBER_TOOL_NAMES = [
   'food_log', 'log_food',
   // Phone
   'send_text', 'draft_email', 'add_reminder', 'set_timer', 'set_alarm', 'my_calendar', 'add_my_event', 'directions',
+  // Places (Apple Maps, on the device)
+  'find_places',
 ].filter((name, index, all) => all.indexOf(name) === index) as [string, ...string[]];
 
 /** The most tools one turn may offer. */
