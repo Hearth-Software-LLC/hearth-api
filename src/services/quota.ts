@@ -4,7 +4,7 @@ import { Ratelimit } from '@upstash/ratelimit';
 import type { Config } from '../config.js';
 import { ApiError } from '../errors.js';
 
-export type ReserveQuota = (userId: string, operation: 'foods' | 'logos' | 'restaurants' | 'plaid-link' | 'banking' | 'ember') => Promise<void>;
+export type ReserveQuota = (userId: string, operation: 'foods' | 'logos' | 'restaurants' | 'plaid-link' | 'banking' | 'ember' | 'ember-speech') => Promise<void>;
 
 export function createQuota(config: Config): ReserveQuota {
   if (!config.UPSTASH_REDIS_REST_URL || !config.UPSTASH_REDIS_REST_TOKEN) {
@@ -59,6 +59,17 @@ export function createQuota(config: Config): ReserveQuota {
     timeout: 3000,
   });
 
+  // Ember's cloud voice: a few sentences per answer. Caps what all accounts together can spend
+  // on Google Text-to-Speech in an hour.
+  const speechLimit = new Ratelimit({
+    redis,
+    limiter: Ratelimit.fixedWindow(3000, '1 h'),
+    prefix: `${config.RATE_LIMIT_PREFIX}:provider`,
+    analytics: false,
+    ephemeralCache: false,
+    timeout: 3000,
+  });
+
   return async (userId, operation) => {
     try {
       const identifier = createHash('sha256').update(userId).digest('hex');
@@ -80,6 +91,13 @@ export function createQuota(config: Config): ReserveQuota {
         if (providerResult.reason === 'timeout') throw new Error('Quota timeout');
         if (!providerResult.success) {
           throw new ApiError(503, 'PROVIDER_QUOTA_EXCEEDED', 'Restaurant data quota is exhausted', retryAfter(providerResult.reset));
+        }
+      }
+      if (operation === 'ember-speech') {
+        const providerResult = await speechLimit.limit('google-tts');
+        if (providerResult.reason === 'timeout') throw new Error('Quota timeout');
+        if (!providerResult.success) {
+          throw new ApiError(503, 'PROVIDER_QUOTA_EXCEEDED', 'The cloud voice is busy', retryAfter(providerResult.reset));
         }
       }
       if (operation === 'plaid-link') {

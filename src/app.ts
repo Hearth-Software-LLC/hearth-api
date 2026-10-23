@@ -43,6 +43,8 @@ import { registerReports } from './routes/v1/reports.js';
 import { registerAccount } from './routes/v1/account.js';
 import { registerEmber } from './ember/routes.js';
 import type { EmberDependencies } from './ember/routes.js';
+import { registerEmberSpeech } from './ember/speech.js';
+import type { EmberSpeechDependencies } from './ember/speech.js';
 import { setAccountDeletionDependencies } from './services/account-deletion.js';
 import { requireCronSecret } from './middleware/cron.js';
 import { supabaseAdmin } from './services/supabase.js';
@@ -71,6 +73,7 @@ export type AppOptions = {
   purgeMovedKitchens?: () => Promise<number>;
   /** Ember's cloud turn (POST /v1/ember/turn). Reads ANTHROPIC_API_KEY when not given. */
   ember?: Partial<EmberDependencies>;
+  emberSpeech?: Partial<EmberSpeechDependencies>;
 };
 
 type RequestLog = {
@@ -249,6 +252,13 @@ export function createApp(options: AppOptions = {}) {
       ? { models: { quick: process.env.EMBER_MODEL_QUICK.trim(), plan: process.env.EMBER_MODEL_PLAN.trim() } }
       : {}),
     ...options.ember,
+  });
+  // Ember's cloud voice for Apple Watch (Google Text-to-Speech, Chirp 3: HD).
+  registerEmberSpeech(app, {
+    reserveQuota,
+    googleApiKey: process.env.GOOGLE_TTS_API_KEY?.trim() || undefined,
+    fetcher: options.fetcher ?? fetch,
+    ...options.emberSpeech,
   });
 
   // DELETE /v1/me and DELETE /v1/bigtable/me share one deletion, which needs these.
