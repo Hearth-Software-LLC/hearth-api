@@ -60,6 +60,8 @@ const configSchema = z.object({
   APNS_TEAM_ID: z.string().trim().regex(/^[A-Z0-9]{10}$/).optional(),
   APNS_PRIVATE_KEY: z.string().trim().includes('PRIVATE KEY').optional(),
   HEARKEN_APNS_TOPIC: z.string().trim().regex(/^[A-Za-z0-9.-]+$/).default('com.stephenwarren.hearken'),
+  // Caloma's intercom wakes locked phones with VoIP pushes (PushKit), sent to this topic.
+  CALOMA_VOIP_TOPIC: z.string().trim().regex(/^[A-Za-z0-9.-]+\.voip$/).default('com.stephenwarren.caloma.voip'),
   // Vercel Cron sends it as a bearer token to /internal/* jobs.
   CRON_SECRET: z.string().trim().min(16).optional(),
   // Where links the API hands out point (study group invites).

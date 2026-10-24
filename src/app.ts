@@ -28,6 +28,9 @@ import { createRestaurantService } from './services/restaurants.js';
 import { registerRestaurants } from './routes/v1/restaurants.js';
 import { registerBigTable } from './bigtable/register.js';
 import { registerAppLinks } from './routes/app-links.js';
+import { createIntercomStore, registerCalomaIntercom } from './intercom/caloma.js';
+import type { CalomaIntercomDependencies } from './intercom/caloma.js';
+import type { ApnsSender } from './integrations/apns.js';
 import { registerHearken } from './hearken/routes.js';
 import { createHearkenService } from './hearken/service.js';
 import type { HearkenService } from './hearken/service.js';
@@ -80,6 +83,8 @@ export type AppOptions = {
   emberSpeech?: Partial<EmberSpeechDependencies>;
   /** Ember's cloud understanding (POST /v1/ember/understand). Reads ANTHROPIC_API_KEY when not given. */
   emberUnderstand?: Partial<EmberUnderstandDependencies>;
+  /** Caloma's intercom wake-up relay. Built from DATABASE_URL and the APNS_* settings when not given. */
+  calomaIntercom?: Partial<CalomaIntercomDependencies>;
   /** Speech-to-text for Ember on Apple Watch (POST /v1/ember/transcribe). Reads GOOGLE_TTS_API_KEY when not given. */
   emberTranscribe?: Partial<EmberTranscribeDependencies>;
 };
@@ -299,6 +304,11 @@ export function createApp(options: AppOptions = {}) {
 
   registerBigTable(app, verifyToken);
   registerAppLinks(app, config);
+  registerCalomaIntercom(app, {
+    store: options.calomaIntercom?.store ?? (databaseFromConfig(config) ? createIntercomStore(databaseFromConfig(config)!) : undefined),
+    apns: options.calomaIntercom?.apns ?? apnsFromConfig(config),
+    topic: options.calomaIntercom?.topic ?? config.CALOMA_VOIP_TOPIC,
+  });
 
   app.doc('/openapi.json', {
     openapi: '3.0.0',
@@ -318,14 +328,21 @@ function databaseFromConfig(config: Config): Sql | undefined {
   return sharedDatabase;
 }
 
+let sharedApns: ApnsSender | undefined;
+
+/** One APNs sender per process (it caches its provider token). */
+function apnsFromConfig(config: Config): ApnsSender | undefined {
+  if (!config.APNS_KEY_ID || !config.APNS_TEAM_ID || !config.APNS_PRIVATE_KEY) return undefined;
+  sharedApns ??= createApnsSender({ keyId: config.APNS_KEY_ID, teamId: config.APNS_TEAM_ID, privateKey: config.APNS_PRIVATE_KEY });
+  return sharedApns;
+}
+
 function createHearkenFromConfig(config: Config): HearkenService | undefined {
   const sql = databaseFromConfig(config);
   if (!sql) return undefined;
   sharedHearken ??= createHearkenService({
     sql,
-    apns: config.APNS_KEY_ID && config.APNS_TEAM_ID && config.APNS_PRIVATE_KEY
-      ? createApnsSender({ keyId: config.APNS_KEY_ID, teamId: config.APNS_TEAM_ID, privateKey: config.APNS_PRIVATE_KEY })
-      : undefined,
+    apns: apnsFromConfig(config),
     apnsTopic: config.HEARKEN_APNS_TOPIC,
     publicBaseUrl: config.PUBLIC_BASE_URL,
   });

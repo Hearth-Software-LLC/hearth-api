@@ -18,6 +18,13 @@ export type ApnsMessage = {
   payload: Record<string, unknown>;
   /** Notifications with the same id replace each other on the device. */
   collapseId?: string;
+  /**
+   * `voip` wakes an app through PushKit to show a CallKit call (its topic ends in `.voip`).
+   * Defaults to `alert`.
+   */
+  pushType?: 'alert' | 'voip';
+  /** Seconds until Apple stops trying to deliver it; 0 means now or never. */
+  expiresIn?: number;
 };
 
 /** `gone`: the token will never work again, so its owner should stop sending to it. */
@@ -59,10 +66,13 @@ export function createApnsSender(credentials: ApnsCredentials): ApnsSender {
         ':path': `/3/device/${message.token}`,
         authorization: `bearer ${jwt}`,
         'apns-topic': message.topic,
-        'apns-push-type': 'alert',
+        'apns-push-type': message.pushType ?? 'alert',
         'apns-priority': '10',
         'content-type': 'application/json',
       };
+      if (message.expiresIn !== undefined) {
+        headers['apns-expiration'] = String(message.expiresIn === 0 ? 0 : Math.floor(Date.now() / 1000) + message.expiresIn);
+      }
       if (message.collapseId) headers['apns-collapse-id'] = message.collapseId.slice(0, 64);
       const request = session.request(headers);
       request.setTimeout(REQUEST_TIMEOUT_MS, () => { request.close(); resolve('failed'); });
