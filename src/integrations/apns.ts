@@ -75,7 +75,11 @@ export function createApnsSender(credentials: ApnsCredentials): ApnsSender {
       }
       if (message.collapseId) headers['apns-collapse-id'] = message.collapseId.slice(0, 64);
       const request = session.request(headers);
-      request.setTimeout(REQUEST_TIMEOUT_MS, () => { request.close(); resolve('failed'); });
+      request.setTimeout(REQUEST_TIMEOUT_MS, () => {
+        console.warn('APNs push timed out', { topic: message.topic, environment: message.environment });
+        request.close();
+        resolve('failed');
+      });
       let status = 0;
       let body = '';
       request.on('response', (response) => { status = Number(response[':status']); });
@@ -85,10 +89,17 @@ export function createApnsSender(credentials: ApnsCredentials): ApnsSender {
         if (status === 200) return resolve('sent');
         let reason = '';
         try { reason = (JSON.parse(body) as { reason?: string }).reason ?? ''; } catch { /* no body */ }
+        // Why Apple refused it (never the token): TopicDisallowed, BadDeviceToken, InvalidProviderToken…
+        console.warn('APNs refused a push', {
+          status, reason, topic: message.topic, pushType: message.pushType ?? 'alert', environment: message.environment,
+        });
         resolve(status === 410 || reason === 'BadDeviceToken' || reason === 'Unregistered' || reason === 'DeviceTokenNotForTopic'
           ? 'gone' : 'failed');
       });
-      request.on('error', () => resolve('failed'));
+      request.on('error', (error) => {
+        console.warn('APNs push failed', { topic: message.topic, environment: message.environment, message: error.message });
+        resolve('failed');
+      });
       request.end(JSON.stringify(message.payload));
     });
   }

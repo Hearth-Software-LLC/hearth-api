@@ -35,7 +35,14 @@ export type IntercomStore = {
   forget(room: string, devices: string[]): Promise<void>;
   /** Their notification tokens stopped working (the VoIP one may still be good). */
   forgetAlerts(room: string, devices: string[]): Promise<void>;
+  /** Whether any device has registered in the room (a real household). */
+  hasRoom(room: string): Promise<boolean>;
 };
+
+export type IceServer = { urls: string[]; username?: string; credential?: string };
+
+/** Makes short-lived TURN credentials (Cloudflare Realtime TURN). */
+export type TurnIssuer = (ttlSeconds: number) => Promise<IceServer[]>;
 
 export type CalomaIntercomDependencies = {
   store?: IntercomStore | undefined;
@@ -43,7 +50,34 @@ export type CalomaIntercomDependencies = {
   topic: string;
   /** Caloma's own bundle id, for ordinary notifications (broadcasts). */
   alertTopic: string;
+  /** TURN for calls away from home. Without it, devices get STUN only (most home networks connect). */
+  turn?: TurnIssuer | undefined;
 };
+
+/** Always handed out: finds a device's public address, free, no credentials. */
+export const stunServers: IceServer[] = [{ urls: ['stun:stun.cloudflare.com:3478'] }];
+const ICE_TTL_SECONDS = 12 * 60 * 60;
+
+/** Cloudflare's TURN key API. Port 53 is left out: it's blocked often enough to slow calls down. */
+export function createCloudflareTurn(keyId: string, apiToken: string, fetcher: typeof fetch): TurnIssuer {
+  return async (ttl) => {
+    const response = await fetcher(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(keyId)}/credentials/generate-ice-servers`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttl }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) throw new Error(`TURN credentials failed: ${response.status}`);
+    const body = await response.json() as { iceServers?: IceServer[] | IceServer };
+    const servers = Array.isArray(body.iceServers) ? body.iceServers : body.iceServers ? [body.iceServers] : [];
+    return servers
+      .map((server) => {
+        const urls = (Array.isArray(server.urls) ? server.urls : [server.urls]).filter((url) => !/:53(\?|$)/.test(url));
+        return { ...server, urls };
+      })
+      .filter((server) => server.urls.length > 0);
+  };
+}
 
 const uuid = z.string().uuid();
 const secret = z.string().regex(/^[A-Za-z0-9_-]{43}$/, 'a base64url 32-byte secret');
@@ -56,6 +90,14 @@ const registerBody = z.object({
   alertToken: z.string().regex(/^[0-9a-fA-F]{64,200}$/).optional(),
   environment,
 }).openapi('CalomaIntercomDevice');
+
+const iceBody = z.object({ secret }).openapi('CalomaIntercomIceRequest');
+
+const iceServerSchema = z.object({
+  urls: z.array(z.string()),
+  username: z.string().optional(),
+  credential: z.string().optional(),
+});
 
 const broadcastBody = z.object({
   secret,
@@ -138,7 +180,46 @@ export function registerCalomaIntercom(app: OpenAPIHono<ApiEnvironment>, depende
     })));
     const gone = devices.filter((_, index) => results[index] === 'gone').map((device) => device.device);
     if (gone.length > 0) await store.forget(room, gone);
+    // Counts only, for "the phone never rang": was it registered, and did Apple take the push?
+    console.info('Caloma intercom ring', {
+      asked: targets.length, registered: devices.length,
+      sent: results.filter((result) => result === 'sent').length,
+      gone: gone.length, failed: results.filter((result) => result === 'failed').length,
+    });
     return context.json({ woken: devices.filter((_, index) => results[index] === 'sent').map((device) => device.device) }, 200);
+  });
+
+  app.openapi(createRoute({
+    method: 'post',
+    path: '/caloma/intercom/ice',
+    tags: ['Caloma'],
+    summary: 'Network servers for a call away from home: STUN, and short-lived TURN credentials',
+    request: { body: { content: { 'application/json': { schema: iceBody } }, required: true } },
+    responses: {
+      200: {
+        description: 'ICE servers for WebRTC, good for `ttl` seconds',
+        content: { 'application/json': { schema: z.object({ iceServers: z.array(iceServerSchema), ttl: z.number() }) } },
+      },
+      403: { description: 'Not a registered household', content: { 'application/json': { schema: errorSchema } } },
+      ...errors,
+    },
+  }), async (context) => {
+    const { store, turn } = dependencies;
+    if (!store) throw unavailable();
+    const body = context.req.valid('json');
+    // TURN relays real bandwidth: only for households with a registered device.
+    if (!(await store.hasRoom(roomFor(body.secret)))) {
+      throw new ApiError(403, 'INTERCOM_UNKNOWN_HOUSEHOLD', 'No devices are registered for this household');
+    }
+    if (!turn) return context.json({ iceServers: stunServers, ttl: ICE_TTL_SECONDS }, 200);
+    try {
+      const servers = await turn(ICE_TTL_SECONDS);
+      return context.json({ iceServers: servers.length > 0 ? servers : stunServers, ttl: ICE_TTL_SECONDS }, 200);
+    } catch (error) {
+      console.error('Caloma TURN credentials failed', { message: error instanceof Error ? error.message : String(error) });
+      // STUN alone still connects most calls.
+      return context.json({ iceServers: stunServers, ttl: 10 * 60 }, 200);
+    }
   });
 
   app.openapi(createRoute({
@@ -208,6 +289,10 @@ export function createIntercomStore(sql: Sql): IntercomStore {
     },
     async forget(room, devices) {
       await sql`delete from public.caloma_intercom_devices where room = ${room} and device_id = any(${devices}::uuid[])`;
+    },
+    async hasRoom(room) {
+      const rows = await sql`select 1 from public.caloma_intercom_devices where room = ${room} limit 1`;
+      return rows.length > 0;
     },
     async forgetAlerts(room, devices) {
       await sql`update public.caloma_intercom_devices set alert_token = null where room = ${room} and device_id = any(${devices}::uuid[])`;

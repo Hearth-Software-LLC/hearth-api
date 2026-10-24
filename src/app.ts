@@ -28,7 +28,7 @@ import { createRestaurantService } from './services/restaurants.js';
 import { registerRestaurants } from './routes/v1/restaurants.js';
 import { registerBigTable } from './bigtable/register.js';
 import { registerAppLinks } from './routes/app-links.js';
-import { createIntercomStore, registerCalomaIntercom } from './intercom/caloma.js';
+import { createCloudflareTurn, createIntercomStore, registerCalomaIntercom } from './intercom/caloma.js';
 import type { CalomaIntercomDependencies } from './intercom/caloma.js';
 import type { ApnsSender } from './integrations/apns.js';
 import { registerHearken } from './hearken/routes.js';
@@ -309,6 +309,10 @@ export function createApp(options: AppOptions = {}) {
     apns: options.calomaIntercom?.apns ?? apnsFromConfig(config),
     topic: options.calomaIntercom?.topic ?? config.CALOMA_VOIP_TOPIC,
     alertTopic: options.calomaIntercom?.alertTopic ?? config.CALOMA_APNS_TOPIC,
+    turn: options.calomaIntercom?.turn
+      ?? (config.CLOUDFLARE_TURN_KEY_ID && config.CLOUDFLARE_TURN_API_TOKEN
+        ? createCloudflareTurn(config.CLOUDFLARE_TURN_KEY_ID, config.CLOUDFLARE_TURN_API_TOKEN, options.fetcher ?? fetch)
+        : undefined),
   });
 
   app.doc('/openapi.json', {

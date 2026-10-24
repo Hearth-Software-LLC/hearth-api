@@ -64,6 +64,10 @@ const configSchema = z.object({
   CALOMA_VOIP_TOPIC: z.string().trim().regex(/^[A-Za-z0-9.-]+\.voip$/).default('com.stephenwarren.caloma.voip'),
   // And ordinary notifications (intercom broadcasts) to Caloma itself.
   CALOMA_APNS_TOPIC: z.string().trim().regex(/^[A-Za-z0-9.-]+$/).default('com.stephenwarren.caloma'),
+  // Cloudflare Realtime TURN, for intercom calls away from home (Cloudflare dashboard ›
+  // Realtime › TURN). Without them calls get STUN only.
+  CLOUDFLARE_TURN_KEY_ID: z.string().trim().min(1).optional(),
+  CLOUDFLARE_TURN_API_TOKEN: z.string().trim().min(1).optional(),
   // Vercel Cron sends it as a bearer token to /internal/* jobs.
   CRON_SECRET: z.string().trim().min(16).optional(),
   // Where links the API hands out point (study group invites).

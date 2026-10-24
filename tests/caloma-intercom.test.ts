@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { roomFor } from '../src/intercom/caloma.js';
-import type { IntercomDevice, IntercomStore } from '../src/intercom/caloma.js';
+import { createCloudflareTurn } from '../src/intercom/caloma.js';
+import type { IntercomDevice, IntercomStore, TurnIssuer } from '../src/intercom/caloma.js';
 import type { ApnsMessage, ApnsResult } from '../src/integrations/apns.js';
 
 const secret = 'a'.repeat(43);
@@ -25,6 +26,7 @@ function memoryStore() {
     },
     async devices(room, ids) { return ids.flatMap((id) => rooms.get(room)?.get(id) ?? []); },
     async forget(room, ids) { for (const id of ids) rooms.get(room)?.delete(id); },
+    async hasRoom(room) { return (rooms.get(room)?.size ?? 0) > 0; },
     async forgetAlerts(room, ids) {
       for (const id of ids) {
         const saved = rooms.get(room)?.get(id);
@@ -35,12 +37,13 @@ function memoryStore() {
   return { store, rooms };
 }
 
-function setup(result: ApnsResult = 'sent') {
+function setup(result: ApnsResult = 'sent', turn?: TurnIssuer) {
   const sent: ApnsMessage[] = [];
   const { store, rooms } = memoryStore();
   const app = createApp({
     calomaIntercom: {
       store,
+      ...(turn ? { turn } : {}),
       apns: async (messages) => { sent.push(...messages); return messages.map(() => result); },
     },
   });
@@ -130,5 +133,42 @@ describe('Caloma intercom relay', () => {
     await post('/caloma/intercom/devices', { secret, device: ipad, token: token('b'), alertToken: token('d'), environment: 'sandbox' });
     await post('/caloma/intercom/devices', { secret, device: ipad, token: token('e'), environment: 'sandbox' });
     expect(rooms.get(roomFor(secret))?.get(ipad)?.alertToken).toBe(token('d'));
+  });
+
+  it('hands out STUN, and TURN when configured, only to registered households', async () => {
+    const turn: TurnIssuer = async () => [{ urls: ['turn:turn.example.com:3478'], username: 'u', credential: 'c' }];
+    const { post } = setup('sent', turn);
+    expect((await post('/caloma/intercom/ice', { secret })).status).toBe(403);
+    await post('/caloma/intercom/devices', { secret, device: ipad, token: token('b'), environment: 'sandbox' });
+    const response = await post('/caloma/intercom/ice', { secret });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      iceServers: [{ urls: ['turn:turn.example.com:3478'], username: 'u', credential: 'c' }], ttl: 43200,
+    });
+  });
+
+  it('falls back to STUN when TURN fails', async () => {
+    const { post } = setup('sent', async () => { throw new Error('down'); });
+    await post('/caloma/intercom/devices', { secret, device: ipad, token: token('b'), environment: 'sandbox' });
+    const body = await (await post('/caloma/intercom/ice', { secret })).json() as { iceServers: { urls: string[] }[] };
+    expect(body.iceServers).toEqual([{ urls: ['stun:stun.cloudflare.com:3478'] }]);
+  });
+
+  it('asks Cloudflare for TURN and drops port 53', async () => {
+    let request: { url: string; init: RequestInit | undefined } | undefined;
+    const fetcher = (async (url: string, init?: RequestInit) => {
+      request = { url, init };
+      return new Response(JSON.stringify({ iceServers: [
+        { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.cloudflare.com:53'] },
+        { urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turn:turn.cloudflare.com:53?transport=udp', 'turns:turn.cloudflare.com:5349?transport=tcp'], username: 'u', credential: 'c' },
+      ] }), { status: 201 });
+    }) as unknown as typeof fetch;
+    const servers = await createCloudflareTurn('key', 'token', fetcher)(600);
+    expect(request?.url).toBe('https://rtc.live.cloudflare.com/v1/turn/keys/key/credentials/generate-ice-servers');
+    expect((request?.init?.headers as Record<string, string>).Authorization).toBe('Bearer token');
+    expect(servers).toEqual([
+      { urls: ['stun:stun.cloudflare.com:3478'] },
+      { urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turns:turn.cloudflare.com:5349?transport=tcp'], username: 'u', credential: 'c' },
+    ]);
   });
 });
