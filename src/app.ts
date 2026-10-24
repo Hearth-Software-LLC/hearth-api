@@ -308,6 +308,7 @@ export function createApp(options: AppOptions = {}) {
     store: options.calomaIntercom?.store ?? (databaseFromConfig(config) ? createIntercomStore(databaseFromConfig(config)!) : undefined),
     apns: options.calomaIntercom?.apns ?? apnsFromConfig(config),
     topic: options.calomaIntercom?.topic ?? config.CALOMA_VOIP_TOPIC,
+    alertTopic: options.calomaIntercom?.alertTopic ?? config.CALOMA_APNS_TOPIC,
   });
 
   app.doc('/openapi.json', {

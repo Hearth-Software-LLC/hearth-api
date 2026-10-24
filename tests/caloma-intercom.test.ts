@@ -19,11 +19,18 @@ function memoryStore() {
         for (const [id, saved] of devices) if (saved.token === device.token) devices.delete(id);
       }
       const devices = rooms.get(room) ?? new Map();
-      devices.set(device.device, device);
+      const saved = devices.get(device.device);
+      devices.set(device.device, { ...device, alertToken: device.alertToken ?? saved?.alertToken });
       rooms.set(room, devices);
     },
     async devices(room, ids) { return ids.flatMap((id) => rooms.get(room)?.get(id) ?? []); },
     async forget(room, ids) { for (const id of ids) rooms.get(room)?.delete(id); },
+    async forgetAlerts(room, ids) {
+      for (const id of ids) {
+        const saved = rooms.get(room)?.get(id);
+        if (saved) saved.alertToken = undefined;
+      }
+    },
   };
   return { store, rooms };
 }
@@ -49,7 +56,7 @@ describe('Caloma intercom relay', () => {
     const response = await post('/caloma/intercom/devices', { secret, device: ipad, token: token('B'), environment: 'sandbox' });
     expect(response.status).toBe(204);
     expect([...rooms.keys()]).toEqual([roomFor(secret)]);
-    expect(rooms.get(roomFor(secret))?.get(ipad)).toEqual({ device: ipad, token: token('b'), environment: 'sandbox' });
+    expect(rooms.get(roomFor(secret))?.get(ipad)).toEqual({ device: ipad, token: token('b'), environment: 'sandbox', alertToken: undefined });
   });
 
   it('wakes the called devices with a VoIP push, never the caller', async () => {
@@ -101,5 +108,27 @@ describe('Caloma intercom relay', () => {
       body: JSON.stringify({ secret, call, from: phone, name: 'Kitchen', video: false, to: [ipad] }),
     });
     expect(response.status).toBe(503);
+  });
+
+  it('tells devices off the network about a broadcast with an ordinary notification', async () => {
+    const { post, sent } = setup();
+    await post('/caloma/intercom/devices', { secret, device: ipad, token: token('b'), alertToken: token('d'), environment: 'production' });
+    await post('/caloma/intercom/devices', { secret, device: phone, token: token('c'), environment: 'production' });
+    const response = await post('/caloma/intercom/broadcast', { secret, call, from: phone, name: 'Steve', to: [ipad, phone] });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ notified: [ipad] });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      token: token('d'), topic: 'com.stephenwarren.caloma', expiresIn: 120, collapseId: call,
+      payload: { aps: { alert: { title: 'Steve' } }, intercom: { broadcast: call, from: phone } },
+    });
+    expect(sent[0]?.pushType).toBeUndefined();
+  });
+
+  it('keeps the notification token when a device re-registers without one', async () => {
+    const { post, rooms } = setup();
+    await post('/caloma/intercom/devices', { secret, device: ipad, token: token('b'), alertToken: token('d'), environment: 'sandbox' });
+    await post('/caloma/intercom/devices', { secret, device: ipad, token: token('e'), environment: 'sandbox' });
+    expect(rooms.get(roomFor(secret))?.get(ipad)?.alertToken).toBe(token('d'));
   });
 });

@@ -19,19 +19,30 @@ import type { ApnsEnvironment, ApnsSender } from '../integrations/apns.js';
  * the relay only ever stores its SHA-256 (the "room"). Knowing the room lets a device wake the
  * other devices in it, and nothing else.
  */
-export type IntercomDevice = { device: string; token: string; environment: ApnsEnvironment };
+export type IntercomDevice = {
+  device: string;
+  /** PushKit (VoIP) token: wakes the device for a call. */
+  token: string;
+  environment: ApnsEnvironment;
+  /** Ordinary notification token, for broadcasts. */
+  alertToken?: string | undefined;
+};
 
 export type IntercomStore = {
   /** Saves the device's token in the room, and forgets the token anywhere else. */
   register(room: string, device: IntercomDevice): Promise<void>;
   devices(room: string, ids: string[]): Promise<IntercomDevice[]>;
   forget(room: string, devices: string[]): Promise<void>;
+  /** Their notification tokens stopped working (the VoIP one may still be good). */
+  forgetAlerts(room: string, devices: string[]): Promise<void>;
 };
 
 export type CalomaIntercomDependencies = {
   store?: IntercomStore | undefined;
   apns?: ApnsSender | undefined;
   topic: string;
+  /** Caloma's own bundle id, for ordinary notifications (broadcasts). */
+  alertTopic: string;
 };
 
 const uuid = z.string().uuid();
@@ -42,8 +53,17 @@ const registerBody = z.object({
   secret,
   device: uuid,
   token: z.string().regex(/^[0-9a-fA-F]{64,200}$/),
+  alertToken: z.string().regex(/^[0-9a-fA-F]{64,200}$/).optional(),
   environment,
 }).openapi('CalomaIntercomDevice');
+
+const broadcastBody = z.object({
+  secret,
+  call: uuid,
+  from: uuid,
+  name: z.string().trim().min(1).max(60),
+  to: z.array(uuid).min(1).max(16),
+}).openapi('CalomaIntercomBroadcast');
 
 const ringBody = z.object({
   secret,
@@ -77,7 +97,10 @@ export function registerCalomaIntercom(app: OpenAPIHono<ApiEnvironment>, depende
     if (!store) throw unavailable();
     const body = context.req.valid('json');
     await store.register(roomFor(body.secret), {
-      device: body.device.toLowerCase(), token: body.token.toLowerCase(), environment: body.environment,
+      device: body.device.toLowerCase(),
+      token: body.token.toLowerCase(),
+      environment: body.environment,
+      alertToken: body.alertToken?.toLowerCase(),
     });
     return context.body(null, 204);
   });
@@ -117,6 +140,48 @@ export function registerCalomaIntercom(app: OpenAPIHono<ApiEnvironment>, depende
     if (gone.length > 0) await store.forget(room, gone);
     return context.json({ woken: devices.filter((_, index) => results[index] === 'sent').map((device) => device.device) }, 200);
   });
+
+  app.openapi(createRoute({
+    method: 'post',
+    path: '/caloma/intercom/broadcast',
+    tags: ['Caloma'],
+    summary: 'Tell household devices that aren\'t on the network that someone is broadcasting',
+    request: { body: { content: { 'application/json': { schema: broadcastBody } }, required: true } },
+    responses: {
+      200: {
+        description: 'Which of the devices were told',
+        content: { 'application/json': { schema: z.object({ notified: z.array(z.string()) }) } },
+      },
+      ...errors,
+    },
+  }), async (context) => {
+    const { store, apns, alertTopic } = dependencies;
+    if (!store || !apns) throw unavailable();
+    const body = context.req.valid('json');
+    const room = roomFor(body.secret);
+    const from = body.from.toLowerCase();
+    const targets = [...new Set(body.to.map((id) => id.toLowerCase()))].filter((id) => id !== from);
+    const devices = (targets.length > 0 ? await store.devices(room, targets) : []).filter((device) => device.alertToken);
+    const results = await apns(devices.map((device) => ({
+      token: device.alertToken!,
+      environment: device.environment,
+      topic: alertTopic,
+      // Only worth seeing while it's on.
+      expiresIn: 120,
+      collapseId: body.call,
+      payload: {
+        aps: {
+          alert: { title: body.name, body: 'Broadcasting on the intercom. Open Caloma to listen.' },
+          sound: 'default',
+          'thread-id': 'intercom',
+        },
+        intercom: { broadcast: body.call, from },
+      },
+    })));
+    const gone = devices.filter((_, index) => results[index] === 'gone').map((device) => device.device);
+    if (gone.length > 0) await store.forgetAlerts(room, gone);
+    return context.json({ notified: devices.filter((_, index) => results[index] === 'sent').map((device) => device.device) }, 200);
+  });
 }
 
 /** Rows in `caloma_intercom_devices` (supabase/migrations/20261023120000_caloma_intercom_devices.sql). */
@@ -126,20 +191,26 @@ export function createIntercomStore(sql: Sql): IntercomStore {
       await sql.begin(async (transaction) => {
         await transaction`delete from public.caloma_intercom_devices where token = ${device.token} and room <> ${room}`;
         await transaction`
-          insert into public.caloma_intercom_devices (room, device_id, token, environment, updated_at)
-          values (${room}, ${device.device}, ${device.token}, ${device.environment}, now())
+          insert into public.caloma_intercom_devices (room, device_id, token, environment, alert_token, updated_at)
+          values (${room}, ${device.device}, ${device.token}, ${device.environment}, ${device.alertToken ?? null}, now())
           on conflict (room, device_id) do update
-            set token = excluded.token, environment = excluded.environment, updated_at = now()`;
+            set token = excluded.token, environment = excluded.environment,
+                alert_token = coalesce(excluded.alert_token, caloma_intercom_devices.alert_token), updated_at = now()`;
       });
     },
     async devices(room, ids) {
-      const rows = await sql<{ device_id: string; token: string; environment: ApnsEnvironment }[]>`
-        select device_id, token, environment from public.caloma_intercom_devices
+      const rows = await sql<{ device_id: string; token: string; environment: ApnsEnvironment; alert_token: string | null }[]>`
+        select device_id, token, environment, alert_token from public.caloma_intercom_devices
         where room = ${room} and device_id = any(${ids}::uuid[])`;
-      return rows.map((row) => ({ device: row.device_id, token: row.token, environment: row.environment }));
+      return rows.map((row) => ({
+        device: row.device_id, token: row.token, environment: row.environment, alertToken: row.alert_token ?? undefined,
+      }));
     },
     async forget(room, devices) {
       await sql`delete from public.caloma_intercom_devices where room = ${room} and device_id = any(${devices}::uuid[])`;
+    },
+    async forgetAlerts(room, devices) {
+      await sql`update public.caloma_intercom_devices set alert_token = null where room = ${room} and device_id = any(${devices}::uuid[])`;
     },
   };
 }
