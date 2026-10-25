@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { roomFor } from '../src/intercom/caloma.js';
 import { createCloudflareTurn } from '../src/intercom/caloma.js';
-import type { IntercomDevice, IntercomStore, TurnIssuer } from '../src/intercom/caloma.js';
+import type { CalomaIntercomDependencies, IntercomDevice, IntercomStore, PlusUntil, TurnIssuer } from '../src/intercom/caloma.js';
 import type { ApnsMessage, ApnsResult } from '../src/integrations/apns.js';
 
 const secret = 'a'.repeat(43);
@@ -13,8 +13,16 @@ const token = (digit: string) => digit.repeat(64);
 
 function memoryStore() {
   const rooms = new Map<string, Map<string, IntercomDevice>>();
+  const plus = new Map<string, PlusUntil>();
   const store: IntercomStore = {
-    async register(room, device) {
+    async hasPlus(room) {
+      return [...(rooms.get(room)?.keys() ?? [])].some((id) => {
+        const until = plus.get(`${room}/${id}`);
+        return until === 'forever' || (typeof until === 'string' && new Date(until) > new Date());
+      });
+    },
+    async register(room, device, until) {
+      if (until !== undefined) plus.set(`${room}/${device.device}`, until);
       for (const [other, devices] of rooms) {
         if (other === room) continue;
         for (const [id, saved] of devices) if (saved.token === device.token) devices.delete(id);
@@ -37,18 +45,21 @@ function memoryStore() {
   return { store, rooms };
 }
 
-function setup(result: ApnsResult = 'sent', turn?: TurnIssuer) {
+function setup(result: ApnsResult = 'sent', turn?: TurnIssuer, extra: Partial<CalomaIntercomDependencies> = {}) {
   const sent: ApnsMessage[] = [];
   const { store, rooms } = memoryStore();
   const app = createApp({
     calomaIntercom: {
       store,
       ...(turn ? { turn } : {}),
+      ...extra,
       apns: async (messages) => { sent.push(...messages); return messages.map(() => result); },
     },
   });
-  const post = (path: string, body: unknown) => app.request(path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  const post = (path: string, body: unknown, bearer?: string) => app.request(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}) },
+    body: JSON.stringify(body),
   });
   return { post, sent, rooms };
 }
@@ -135,21 +146,38 @@ describe('Caloma intercom relay', () => {
     expect(rooms.get(roomFor(secret))?.get(ipad)?.alertToken).toBe(token('d'));
   });
 
-  it('hands out STUN, and TURN when configured, only to registered households', async () => {
+  const plusAccounts: Partial<CalomaIntercomDependencies> = {
+    verifyToken: async (bearer) => ({ userId: bearer, isAnonymous: false }),
+    entitlements: async (userId) => (userId === 'steve'
+      ? [{ id: 'hearth_plus', expiresAt: '2999-01-01T00:00:00Z', source: 'own' }]
+      : [{ id: 'caloma_plus', expiresAt: null, source: 'own' }]),
+  };
+
+  it('calls away from home (TURN) only for households with Hearth+', async () => {
     const turn: TurnIssuer = async () => [{ urls: ['turn:turn.example.com:3478'], username: 'u', credential: 'c' }];
-    const { post } = setup('sent', turn);
+    const { post } = setup('sent', turn, plusAccounts);
     expect((await post('/caloma/intercom/ice', { secret })).status).toBe(403);
+    // A board, not signed in: home calls only.
     await post('/caloma/intercom/devices', { secret, device: ipad, token: token('b'), environment: 'sandbox' });
-    const response = await post('/caloma/intercom/ice', { secret });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({
-      iceServers: [{ urls: ['turn:turn.example.com:3478'], username: 'u', credential: 'c' }], ttl: 43200,
+    expect(await (await post('/caloma/intercom/ice', { secret })).json()).toEqual({
+      iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }], ttl: 43200, awayCalls: false,
     });
+    // Caloma Plus alone doesn't include it.
+    await post('/caloma/intercom/devices', { secret, device: phone, token: token('c'), environment: 'sandbox' }, 'mom');
+    expect((await (await post('/caloma/intercom/ice', { secret })).json() as { awayCalls: boolean }).awayCalls).toBe(false);
+    // A phone signed in with Hearth+: the whole household.
+    await post('/caloma/intercom/devices', { secret, device: phone, token: token('c'), environment: 'sandbox' }, 'steve');
+    expect(await (await post('/caloma/intercom/ice', { secret })).json()).toEqual({
+      iceServers: [{ urls: ['turn:turn.example.com:3478'], username: 'u', credential: 'c' }], ttl: 43200, awayCalls: true,
+    });
+    // Registering again without a token keeps it.
+    await post('/caloma/intercom/devices', { secret, device: phone, token: token('c'), environment: 'sandbox' });
+    expect((await (await post('/caloma/intercom/ice', { secret })).json() as { awayCalls: boolean }).awayCalls).toBe(true);
   });
 
   it('falls back to STUN when TURN fails', async () => {
-    const { post } = setup('sent', async () => { throw new Error('down'); });
-    await post('/caloma/intercom/devices', { secret, device: ipad, token: token('b'), environment: 'sandbox' });
+    const { post } = setup('sent', async () => { throw new Error('down'); }, plusAccounts);
+    await post('/caloma/intercom/devices', { secret, device: ipad, token: token('b'), environment: 'sandbox' }, 'steve');
     const body = await (await post('/caloma/intercom/ice', { secret })).json() as { iceServers: { urls: string[] }[] };
     expect(body.iceServers).toEqual([{ urls: ['stun:stun.cloudflare.com:3478'] }]);
   });

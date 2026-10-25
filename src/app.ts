@@ -313,6 +313,8 @@ export function createApp(options: AppOptions = {}) {
       ?? (config.CLOUDFLARE_TURN_KEY_ID && config.CLOUDFLARE_TURN_API_TOKEN
         ? createCloudflareTurn(config.CLOUDFLARE_TURN_KEY_ID, config.CLOUDFLARE_TURN_API_TOKEN, options.fetcher ?? fetch)
         : undefined),
+    verifyToken: options.calomaIntercom?.verifyToken ?? verifyToken,
+    entitlements: options.calomaIntercom?.entitlements ?? entitlementSource,
   });
 
   app.doc('/openapi.json', {
