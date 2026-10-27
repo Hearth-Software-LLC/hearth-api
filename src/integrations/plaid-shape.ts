@@ -25,6 +25,11 @@ const transactionSchema = z.object({
   name: z.string(),
   merchant_name: z.string().nullish(),
   pending: z.boolean(),
+  /** Who the card belongs to, for accounts with several cards (sub-accounts). Bank-defined format, usually null. */
+  account_owner: z.string().nullish(),
+  /** The bank's raw text. Only read here for a card's last four digits; never sent to the apps. */
+  original_description: z.string().nullish(),
+  payment_channel: z.string().nullish(),
   logo_url: z.string().nullish(),
   website: z.string().nullish(),
   personal_finance_category: z.object({ primary: z.string(), detailed: z.string().nullish() }).nullish(),
@@ -218,5 +223,37 @@ export function toTransaction(transaction: PlaidTransaction) {
     address: streetAddress(transaction.location),
     latitude: transaction.location?.lat ?? null,
     longitude: transaction.location?.lon ?? null,
+    ...cardOf(transaction),
+    paymentChannel: transaction.payment_channel ?? null,
   };
+}
+
+/**
+ * Which card a charge was made with, so Suffice can tell whose it was on an account with more
+ * than one card. Plaid's `account_owner` comes first (a name, a last four, or both, in whatever
+ * format the bank uses); otherwise the last four digits from the bank's raw description
+ * ("POS DEBIT … CARD 5678", "XXXXXXXXXXXX5678"). Only the last four and the owner label leave the
+ * API, never the raw description.
+ */
+export function cardOf(transaction: Pick<PlaidTransaction, 'account_owner' | 'original_description'>): {
+  cardLabel: string | null; cardLast4: string | null;
+} {
+  const owner = transaction.account_owner?.replace(/\s+/g, ' ').trim() || null;
+  const cardLabel = owner ? owner.slice(0, 64) : null;
+  const fromOwner = owner?.match(/(?:^|\D)(\d{4})\s*$/)?.[1] ?? null;
+  return { cardLabel, cardLast4: fromOwner ?? lastFourInDescription(transaction.original_description) };
+}
+
+/** A card's last four in a bank description, or null. Store numbers ("#1820") don't count. */
+export function lastFourInDescription(description: string | null | undefined): string | null {
+  if (!description) return null;
+  const patterns = [
+    /\b(?:CARD|CRD)\s*(?:NO\.?|#|ENDING(?:\s+IN)?)?\s*[X*]*\s*(\d{4})\b/i,
+    /[X*]{4,}[\s-]*(\d{4})\b/i,
+  ];
+  for (const pattern of patterns) {
+    const found = description.match(pattern)?.[1];
+    if (found) return found;
+  }
+  return null;
 }

@@ -43,6 +43,9 @@ const transactionSchema = z.object({
   amountCents: z.number().int(), isIncome: z.boolean(), category: z.string().nullable(), categoryDetail: z.string().nullable(),
   logoUrl: z.string().nullable(), merchantDomain: z.string().nullable(),
   city: z.string().nullable(), address: z.string().nullable(), latitude: z.number().nullable(), longitude: z.number().nullable(),
+  cardLabel: z.string().nullable().openapi({ description: "The bank's label for the card used (Plaid account_owner), on accounts with several cards. Usually null." }),
+  cardLast4: z.string().nullable().openapi({ description: 'Last four digits of the card used, from the label or the bank description.' }),
+  paymentChannel: z.string().nullable().openapi({ description: "Plaid's payment_channel: 'in store', 'online' or 'other'." }),
 }).openapi('BankTransaction');
 const productSchema = z.enum(['transactions', 'investments']);
 const connectionSchema = z.object({

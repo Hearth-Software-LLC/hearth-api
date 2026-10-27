@@ -226,13 +226,36 @@ describe('Syncing transactions', () => {
     expect(body.added).toEqual([
       { id: 'tx-1', accountId: 'acct-1', date: '2026-10-11', payee: 'Target', amountCents: 1234, isIncome: false,
         category: 'GENERAL_MERCHANDISE', categoryDetail: 'GENERAL_MERCHANDISE_SUPERSTORES', logoUrl: 'https://plaid-merchant-logos.plaid.com/target.png', merchantDomain: 'target.com',
-        city: 'Lehi', address: '3401 N Thanksgiving Way, Lehi, UT 84043', latitude: 40.39, longitude: -111.85 },
+        city: 'Lehi', address: '3401 N Thanksgiving Way, Lehi, UT 84043', latitude: 40.39, longitude: -111.85,
+        cardLabel: null, cardLast4: null, paymentChannel: null },
       expect.objectContaining({ id: 'tx-2', payee: 'PAYROLL', amountCents: 250000, isIncome: true, logoUrl: null, merchantDomain: null,
         city: 'Provo', address: null, latitude: null }),
     ]);
     expect(body).toMatchObject({ removed: ['tx-old'], nextCursor: 'cursor-2', hasMore: false });
     expect(body.accounts).toHaveLength(2);
     expect(JSON.stringify(body)).not.toContain('access-sandbox-secret');
+  });
+
+  it('sends which card was used but never the raw bank description', async () => {
+    const page = {
+      added: [plaidTransaction({
+        account_owner: 'S. Warren - 1234', payment_channel: 'in store',
+        original_description: 'POS DEBIT TARGET T-1820 OREM UT CARD 1234 SECRET-REF-99',
+      }), plaidTransaction({
+        transaction_id: 'tx-3', account_owner: null, payment_channel: 'online',
+        original_description: 'DEBIT CARD PURCHASE XXXXXXXXXXXX5678 OLD NAVY',
+      })],
+      modified: [], removed: [], next_cursor: 'next', has_more: false,
+    };
+    const { store } = memoryStore(storedItem());
+    const { app } = setup({ store, data: dataClient({ syncTransactions: vi.fn(async () => page) }) });
+    const response = await app.request('/v1/banking/connections/item-1/sync', json({ cursor: 'cursor-1' }));
+    const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.added[0]).toMatchObject({ cardLabel: 'S. Warren - 1234', cardLast4: '1234', paymentChannel: 'in store' });
+    expect(body.added[1]).toMatchObject({ cardLabel: null, cardLast4: '5678', paymentChannel: 'online' });
+    expect(JSON.stringify(body)).not.toContain('SECRET-REF-99');
+    expect(JSON.stringify(body)).not.toContain('OLD NAVY');
   });
 
   it('pages through more results and reports when there are still more', async () => {

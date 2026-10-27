@@ -90,7 +90,11 @@ export function createPlaidDataClient(config: Config): PlaidDataClient | undefin
         options: { include_optional_metadata: true },
       }, { signal })).data,
     syncTransactions: async (accessToken, cursor, signal) =>
-      (await client.transactionsSync({ access_token: accessToken, ...(cursor ? { cursor } : {}), count: 100 }, { signal })).data,
+      (await client.transactionsSync({
+        access_token: accessToken, ...(cursor ? { cursor } : {}), count: 100,
+        // Read for a card's last four digits (see cardOf); the raw text never leaves the API.
+        options: { include_original_description: true },
+      }, { signal })).data,
     removeItem: async (accessToken, signal) =>
       (await client.itemRemove({ access_token: accessToken }, { signal })).data,
     getInvestmentHoldings: async (accessToken, signal) =>
