@@ -218,14 +218,18 @@ export function registerAdCopy(app: OpenAPIHono<ApiEnvironment>, dependencies: A
     return { type: body?.error?.type ?? 'unknown', message: (body?.error?.message ?? '').slice(0, 300) };
   }
 
-  async function call(payload: Record<string, unknown>) {
-    let upstream = await send(payload);
-    // A model that thinks by default refuses a forced tool call; ask again with thinking off.
-    if (upstream && upstream.status === 400) {
+  /** Thinking settings learned from a refusal, used for the rest of the request. */
+  async function call(payload: Record<string, unknown>, extra: Record<string, unknown>) {
+    let upstream = await send({ ...payload, ...extra });
+    // A model that thinks by default refuses a forced tool call. Ask again with thinking off,
+    // the way its error says to (`"thinking": {"type": "between_tools"}` on some models).
+    if (upstream && upstream.status === 400 && !extra.thinking) {
       const error = await upstreamError(upstream.clone());
       if (/thinking|tool_choice/i.test(error.message)) {
-        log({ route: 'marketing.adCopy', upstreamStatus: 400, retry: 'thinking-disabled', error: error.message });
-        upstream = await send({ ...payload, thinking: { type: 'disabled' } });
+        const suggested = /"thinking":\s*\{\s*"type":\s*"([a-z_]+)"\s*\}\s*instead/i.exec(error.message)?.[1] ?? 'disabled';
+        extra.thinking = { type: suggested };
+        log({ route: 'marketing.adCopy', upstreamStatus: 400, retry: `thinking-${suggested}` });
+        upstream = await send({ ...payload, ...extra });
       }
     }
     if (!upstream || !upstream.ok) {
@@ -242,7 +246,7 @@ export function registerAdCopy(app: OpenAPIHono<ApiEnvironment>, dependencies: A
       log({ route: 'marketing.adCopy', shape: 'invalid' });
       throw new ApiError(502, 'UPSTREAM_FAILED', 'Claude answered out of shape');
     }
-    return { block, versions: parsed.data.versions, usage: reply?.usage ?? {} };
+    return { block, content: reply?.content ?? [], versions: parsed.data.versions, usage: reply?.usage ?? {} };
   }
 
   app.openapi(createRoute({
@@ -272,7 +276,8 @@ export function registerAdCopy(app: OpenAPIHono<ApiEnvironment>, dependencies: A
     const startedAt = performance.now();
     const limits = adLimits(body.platforms);
     const payload = adCopyPayload(body, model, limits);
-    const first = await call(payload);
+    const extra: Record<string, unknown> = {};
+    const first = await call(payload, extra);
     let versions = first.versions.slice(0, body.count);
     let usage = [first.usage];
 
@@ -288,13 +293,14 @@ export function registerAdCopy(app: OpenAPIHono<ApiEnvironment>, dependencies: A
         ...payload,
         messages: [
           ...payload.messages,
-          { role: 'assistant', content: [{ type: 'tool_use', id: first.block.id, name: SUBMIT_TOOL.name, input: first.block.input }] },
+          // Every block of the reply, thinking included, as the API expects it back.
+          { role: 'assistant', content: first.content },
           { role: 'user', content: [{
             type: 'tool_result', tool_use_id: first.block.id,
             content: `These are too long:\n${notes.join('\n')}\nCall submit_versions again with every version, shortening only those fields and keeping the rest exactly as they are.`,
           }] },
         ],
-      }).catch(() => null);
+      }, extra).catch(() => null);
       if (second && second.versions.length >= versions.length) {
         versions = second.versions.slice(0, versions.length);
         usage = [...usage, second.usage];

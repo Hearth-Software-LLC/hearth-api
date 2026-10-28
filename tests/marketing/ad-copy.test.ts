@@ -157,6 +157,25 @@ describe('ad copy upstream errors', () => {
     expect(JSON.parse(String(fetcher.mock.calls[1]![1]?.body)).thinking).toEqual({ type: 'disabled' });
   });
 
+  it('uses the thinking setting the error asks for, on the shortening call too', async () => {
+    const refusal = 'To turn thinking off on this model, send "thinking": {"type": "between_tools"} instead of {"type": "disabled"}. The model does not think before responding.';
+    const long = { ...good, headline: 'A headline that is far too long for Snapchat ads' };
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ type: 'error', error: { type: 'invalid_request_error', message: refusal } }, { status: 400 }))
+      .mockResolvedValueOnce(Response.json({
+        content: [{ type: 'thinking', thinking: 'Writing it.', signature: 'sig' }, { type: 'tool_use', id: 'toolu_1', name: 'submit_versions', input: { versions: [long] } }],
+      }))
+      .mockResolvedValueOnce(claudeReply([good], 'toolu_2'));
+    const response = await write(setup(fetcher).app, { ...body, count: 1 });
+    expect(response.status).toBe(200);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(fetcher.mock.calls[1]![1]?.body)).thinking).toEqual({ type: 'between_tools' });
+    const shorten = JSON.parse(String(fetcher.mock.calls[2]![1]?.body));
+    expect(shorten.thinking).toEqual({ type: 'between_tools' });
+    expect(shorten.messages[1].content.map((block: { type: string }) => block.type)).toEqual(['thinking', 'tool_use']);
+    expect((await response.json()).versions[0].tooLong).toEqual([]);
+  });
+
   it('says what Claude objected to', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json({ type: 'error', error: { type: 'not_found_error', message: 'model: claude-nope' } }, { status: 404 }));
     const response = await write(setup(fetcher).app);
