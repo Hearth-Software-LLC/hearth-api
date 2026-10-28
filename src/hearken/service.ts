@@ -182,13 +182,14 @@ const iso = (value: Date) => value.toISOString();
 const legacyKey = (legacyId: string) => `legacy:${legacyId}`;
 const snippet = (text: string, length = 120) => (text.length > length ? `${text.slice(0, length - 1).trimEnd()}…` : text);
 
-function newInviteCode() {
+/** Eight characters from an alphabet without look-alikes (no I, O, 0 or 1). Suffice group budgets use the same codes. */
+export function newInviteCode() {
   let code = '';
   for (let index = 0; index < 8; index += 1) code += INVITE_ALPHABET[randomInt(INVITE_ALPHABET.length)];
   return code;
 }
 
-function isUniqueViolation(error: unknown, constraint?: string) {
+export function isUniqueViolation(error: unknown, constraint?: string) {
   const record = error as { code?: string | undefined; constraint_name?: string | undefined };
   return record?.code === '23505' && (!constraint || record.constraint_name === constraint);
 }

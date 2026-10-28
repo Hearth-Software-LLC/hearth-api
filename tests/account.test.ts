@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { readConfig } from '../src/config.js';
 import type { HearkenService } from '../src/hearken/service.js';
+import type { BudgetGroupsService } from '../src/budget-groups/service.js';
 import type { PlaidDataClient } from '../src/integrations/plaid.js';
 import type { ConnectionStore } from '../src/services/connections.js';
 import type { ReportStore } from '../src/services/reports.js';
@@ -67,6 +68,7 @@ const plaidError = (code: string) => Object.assign(new Error(code), { response: 
 
 function setup(options: { connections?: string[] } = {}) {
   const purgeUser = vi.fn().mockResolvedValue(undefined);
+  const purgeBudgetGroups = vi.fn().mockResolvedValue(undefined);
   const removeItem = vi.fn<PlaidDataClient['removeItem']>().mockResolvedValue({});
   const items = options.connections ?? ['item-1', 'item-2'];
   const connectionStore = {
@@ -80,13 +82,14 @@ function setup(options: { connections?: string[] } = {}) {
     config: readConfig({}),
     verifyToken: async (token) => ({ userId: token === 'anonymous' ? 'anon-1' : 'user-1', isAnonymous: token === 'anonymous' }),
     hearken: { purgeUser } as unknown as HearkenService,
+    budgetGroups: { purgeUser: purgeBudgetGroups } as unknown as BudgetGroupsService,
     plaidDataClient: { removeItem } as unknown as PlaidDataClient,
     connectionStore,
     tokenSeal: { seal: vi.fn(), open: (sealed: string) => sealed.replace('sealed-', 'token-') },
     reports,
   });
   const call = (token = 'apple') => app.request('/v1/me', { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
-  return { call, purgeUser, removeItem, connectionStore, reports };
+  return { call, purgeUser, purgeBudgetGroups, removeItem, connectionStore, reports };
 }
 
 beforeEach(() => {
@@ -107,10 +110,12 @@ afterEach(() => { vi.unstubAllEnvs(); });
 
 describe('DELETE /v1/me', () => {
   it('deletes the account in every app', async () => {
-    const { call, purgeUser, removeItem, connectionStore, reports } = setup();
+    const { call, purgeUser, purgeBudgetGroups, removeItem, connectionStore, reports } = setup();
     const response = await call();
     expect(response.status).toBe(204);
     expect(purgeUser).toHaveBeenCalledWith('user-1');
+    expect(purgeBudgetGroups).toHaveBeenCalledWith('user-1');
+    expect(mocks.deleteUser.mock.invocationCallOrder[0]).toBeGreaterThan(purgeBudgetGroups.mock.invocationCallOrder[0]!);
     expect(reports.removeByReporter).toHaveBeenCalledWith('user-1');
     expect(removeItem).toHaveBeenCalledTimes(2);
     expect(removeItem).toHaveBeenCalledWith('token-item-1', expect.any(AbortSignal));
@@ -136,11 +141,12 @@ describe('DELETE /v1/me', () => {
 
   it('refuses while the caller runs a household with other people, deleting nothing', async () => {
     mocks.state.managesMembers = true;
-    const { call, purgeUser, removeItem } = setup();
+    const { call, purgeUser, purgeBudgetGroups, removeItem } = setup();
     const response = await call();
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ error: { code: 'HOUSEHOLD_HAS_MEMBERS' } });
     expect(purgeUser).not.toHaveBeenCalled();
+    expect(purgeBudgetGroups).not.toHaveBeenCalled();
     expect(removeItem).not.toHaveBeenCalled();
     expect(mocks.deleteUser).not.toHaveBeenCalled();
   });

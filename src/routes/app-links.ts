@@ -19,6 +19,7 @@ export function registerAppLinks(app: OpenAPIHono<ApiEnvironment>, config: Confi
     if (config.APPLE_APP_IDS.length === 0) return context.notFound();
     context.header('Cache-Control', 'public, max-age=3600');
     const hearken = config.APPLE_APP_IDS.filter((id) => id.endsWith('.hearken'));
+    const suffice = config.APPLE_APP_IDS.filter((id) => id.endsWith('.suffice'));
     return context.json({
       applinks: {
         details: [
@@ -29,6 +30,10 @@ export function registerAppLinks(app: OpenAPIHono<ApiEnvironment>, config: Confi
           ...(hearken.length > 0 ? [{
             appIDs: hearken,
             components: [{ '/': '/hearken/join/*', comment: 'Hearken study group invites' }],
+          }] : []),
+          ...(suffice.length > 0 ? [{
+            appIDs: suffice,
+            components: [{ '/': '/suffice/join/*', comment: 'Suffice group budget invites' }],
           }] : []),
           // Each app opens the household invitations made in it (all the apps share one iCloud
           // container, so iOS would otherwise pick any of them for the iCloud link).

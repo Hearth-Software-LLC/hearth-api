@@ -15,6 +15,9 @@ describe('Universal Links for the Plaid OAuth return', () => {
           components: [{ '/': '/plaid/*', comment: 'Plaid OAuth return' }],
         }, {
           appIDs: ['BH8R3BX5WF.com.stephenwarren.suffice'],
+          components: [{ '/': '/suffice/join/*', comment: 'Suffice group budget invites' }],
+        }, {
+          appIDs: ['BH8R3BX5WF.com.stephenwarren.suffice'],
           components: [{ '/': '/suffice/household/*', comment: 'Household invitations made in suffice' }],
         }],
       },

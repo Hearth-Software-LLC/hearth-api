@@ -1,5 +1,6 @@
 import { ApiError } from '../errors.js';
 import type { HearkenService } from '../hearken/service.js';
+import type { BudgetGroupsService } from '../budget-groups/service.js';
 import { isPlaidCode, plaidFailure } from '../integrations/plaid.js';
 import type { PlaidDataClient } from '../integrations/plaid.js';
 import { insertNotification } from '../bigtable/lib/notifications.js';
@@ -14,10 +15,10 @@ import type { TokenSeal } from './token-seal.js';
  * account deletion also leaves nothing behind in the other apps, by DELETE /v1/bigtable/me.
  *
  * Order: BigTable's checks (nothing is deleted while the caller still runs a household with other
- * people in it), BigTable's own cleanup, Hearken, Suffice's bank connections, RevenueCat, push
- * tokens, and last the auth user, whose foreign keys take the rest of BigTable's rows with it.
- * Hearken's tables and plaid_connections have no foreign key to auth.users, so they're deleted here
- * explicitly. Every step can run again, so a failed deletion can simply be retried.
+ * people in it), BigTable's own cleanup, Hearken, Suffice's group budgets and bank connections,
+ * RevenueCat, push tokens, and last the auth user, whose foreign keys take the rest of BigTable's
+ * rows with it. Hearken's and the group budgets' tables and plaid_connections have no foreign key
+ * to auth.users, so they're deleted here explicitly. Every step can run again, so a failed deletion can simply be retried.
  */
 
 export type AccountDeletionDependencies = {
@@ -25,6 +26,7 @@ export type AccountDeletionDependencies = {
   connections?: ConnectionStore | undefined;
   seal?: TokenSeal | undefined;
   hearken?: HearkenService | undefined;
+  budgetGroups?: Pick<BudgetGroupsService, 'purgeUser'> | undefined;
   reports?: ReportStore | undefined;
 };
 
@@ -201,7 +203,15 @@ export async function deleteHearthAccount(userId: string, options: DeleteAccount
     }
   }
 
-  // 4. Suffice: banks connected through Plaid.
+  // 4. Suffice: group budgets the person owns are erased for everyone; elsewhere they leave, taking
+  // their expenses and settlements. Then the banks connected through Plaid.
+  if (dependencies.budgetGroups) {
+    try {
+      await dependencies.budgetGroups.purgeUser(userId);
+    } catch (error) {
+      throw new AccountDeletionError('budget groups cleanup', 'Failed to delete your group budget data', error);
+    }
+  }
   await removeBankConnections(userId);
 
   // 5. RevenueCat. Deleting an unknown customer is a success (404).

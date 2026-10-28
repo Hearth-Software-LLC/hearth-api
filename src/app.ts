@@ -35,6 +35,9 @@ import { registerHearken } from './hearken/routes.js';
 import { createHearkenService } from './hearken/service.js';
 import type { HearkenService } from './hearken/service.js';
 import { createDatabase } from './hearken/db.js';
+import { registerBudgetGroups } from './budget-groups/routes.js';
+import { createBudgetGroupsService } from './budget-groups/service.js';
+import type { BudgetGroupsService } from './budget-groups/service.js';
 import { createApnsSender } from './integrations/apns.js';
 import { appAccess, effectiveEntitlements } from './services/subscriptions.js';
 import { createEntitlementGate, createHearthPlusGate, loadEntitlements } from './services/entitlements.js';
@@ -71,6 +74,8 @@ export type AppOptions = {
   cache?: Cache;
   /** Hearken study groups. Built from DATABASE_URL and the APNS_* settings when not given. */
   hearken?: HearkenService;
+  /** Suffice group budgets. Built from DATABASE_URL when not given. */
+  budgetGroups?: BudgetGroupsService;
   /** The caller's active entitlements (own plus household organizer's). Read from Supabase when not given. */
   entitlements?: EntitlementSource;
   /** Content reports (POST /v1/reports). Built from DATABASE_URL when not given. */
@@ -263,6 +268,11 @@ export function createApp(options: AppOptions = {}) {
   registerHearken(app, config, { service: hearken, requireAccess: entitlementGate });
 
   const database = databaseFromConfig(config);
+  // Suffice group budgets: creating one needs Suffice Plus or Hearth+; joining is free.
+  const budgetGroups = options.budgetGroups
+    ?? (database ? createBudgetGroupsService({ sql: database, publicBaseUrl: config.PUBLIC_BASE_URL }) : undefined);
+  registerBudgetGroups(app, { service: budgetGroups, requireAccess: entitlementGate });
+
   const reports = options.reports ?? (database ? createReportStore(database) : undefined);
   registerReports(app, reports);
 
@@ -309,7 +319,9 @@ export function createApp(options: AppOptions = {}) {
   });
 
   // DELETE /v1/me and DELETE /v1/bigtable/me share one deletion, which needs these.
-  setAccountDeletionDependencies({ plaidClient: plaidDataClient, connections: connectionStore, seal: tokenSeal, hearken, reports });
+  setAccountDeletionDependencies({
+    plaidClient: plaidDataClient, connections: connectionStore, seal: tokenSeal, hearken, budgetGroups, reports,
+  });
   registerAccount(app);
 
   // BigTable's daily purge of kitchens moved to iCloud more than 30 days ago (Vercel Cron, like Hearken's).
