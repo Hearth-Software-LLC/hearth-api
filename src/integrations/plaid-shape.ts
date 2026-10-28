@@ -48,6 +48,114 @@ export const syncSchema = z.object({
   has_more: z.boolean(),
 });
 
+// MARK: Investments
+
+const securitySchema = z.object({
+  security_id: z.string().min(1),
+  name: z.string().nullish(),
+  ticker_symbol: z.string().nullish(),
+  type: z.string().nullish(),
+  is_cash_equivalent: z.boolean().nullish(),
+  close_price: z.number().nullish(),
+  close_price_as_of: z.string().nullish(),
+});
+const holdingSchema = z.object({
+  account_id: z.string(),
+  security_id: z.string(),
+  quantity: z.number(),
+  institution_price: z.number(),
+  institution_price_as_of: z.string().nullish(),
+  institution_value: z.number(),
+  cost_basis: z.number().nullish(),
+});
+const investmentTransactionSchema = z.object({
+  investment_transaction_id: z.string().min(1),
+  account_id: z.string(),
+  security_id: z.string().nullish(),
+  date: z.string(),
+  name: z.string(),
+  quantity: z.number(),
+  amount: z.number(),
+  price: z.number(),
+  fees: z.number().nullish(),
+  type: z.string(),
+  subtype: z.string().nullish(),
+});
+
+export const holdingsSchema = z.object({
+  accounts: z.array(accountSchema),
+  holdings: z.array(holdingSchema),
+  securities: z.array(securitySchema),
+});
+export const investmentTransactionsSchema = z.object({
+  accounts: z.array(accountSchema),
+  investment_transactions: z.array(investmentTransactionSchema),
+  securities: z.array(securitySchema),
+  total_investment_transactions: z.number().int(),
+});
+
+/** Plaid's investment subtypes, reduced to the handful the app names ("401(k)", "IRA"…). */
+export function toInvestmentAccount(account: PlaidAccount) {
+  const subtype = (account.subtype ?? '').toLowerCase();
+  const kind: '401k' | 'ira' | 'roth' | 'brokerage' | 'education' | 'hsa' | 'other' =
+    ['401k', '403b', '457b', 'thrift savings plan', 'pension', 'retirement', 'keogh', 'profit sharing plan'].includes(subtype) ? '401k'
+    : ['roth', 'roth 401k'].includes(subtype) ? 'roth'
+    : ['ira', 'sep ira', 'simple ira', 'sarsep', 'rollover'].includes(subtype) ? 'ira'
+    : ['529', 'education savings account'].includes(subtype) ? 'education'
+    : subtype === 'hsa' ? 'hsa'
+    : ['brokerage', 'non-taxable brokerage account', 'stock plan', 'mutual fund', 'trust', 'ugma', 'utma'].includes(subtype) ? 'brokerage'
+    : 'other';
+  return {
+    id: account.account_id,
+    name: account.official_name ?? account.name,
+    mask: account.mask ?? '',
+    kind,
+    balanceCents: cents(account.balances.current ?? account.balances.available ?? 0),
+  };
+}
+
+export function toSecurity(security: z.infer<typeof securitySchema>) {
+  return {
+    id: security.security_id,
+    ticker: security.ticker_symbol ?? null,
+    name: security.name ?? security.ticker_symbol ?? 'Security',
+    type: security.type ?? 'other',
+    isCash: security.is_cash_equivalent ?? false,
+    closePrice: security.close_price ?? null,
+    closePriceDate: security.close_price_as_of ?? null,
+  };
+}
+
+export function toHolding(holding: z.infer<typeof holdingSchema>) {
+  return {
+    accountId: holding.account_id,
+    securityId: holding.security_id,
+    quantity: holding.quantity,
+    price: holding.institution_price,
+    priceDate: holding.institution_price_as_of ?? null,
+    valueCents: cents(holding.institution_value),
+    costBasisCents: holding.cost_basis == null ? null : cents(holding.cost_basis),
+  };
+}
+
+/** Plaid: a positive amount is cash leaving the account (a buy); `cashIn` says which way it went. */
+export function toInvestmentTransaction(transaction: z.infer<typeof investmentTransactionSchema>) {
+  return {
+    id: transaction.investment_transaction_id,
+    accountId: transaction.account_id,
+    securityId: transaction.security_id ?? null,
+    date: transaction.date,
+    name: transaction.name,
+    kind: transaction.type,
+    subtype: transaction.subtype ?? null,
+    quantity: transaction.quantity,
+    price: transaction.price,
+    amountCents: Math.abs(cents(transaction.amount)),
+    cashIn: transaction.amount < 0,
+    feesCents: transaction.fees == null ? 0 : cents(transaction.fees),
+  };
+}
+
 export type PlaidTransaction = z.infer<typeof transactionSchema>;
 export type PlaidAccount = z.infer<typeof accountSchema>;
 

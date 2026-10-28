@@ -16,11 +16,13 @@ The shared TypeScript/Hono backend for the Hearth iOS apps (BigTable, Suffice, S
 | `GET /v1/foods/search?q=apple` | Anonymous or linked Supabase user + shared quota | Searches USDA FoodData Central summaries |
 | `GET /v1/restaurants/menu?name=Chipotle%20Mexican%20Grill` | Anonymous or linked Supabase user + shared quota | Matches a place name to a chain and returns its menu with nutrition per serving |
 | `POST /v1/restaurants/lookup` | Anonymous or linked Supabase user + shared quota | `{ "names": [...] }` (up to 12): which places are chains with published menus |
-| `POST /v1/banking/link-token` | Linked Supabase user + shared quota | Creates a Plaid Link token; with `itemId`, one for update mode |
+| `POST /v1/banking/link-token` | Linked Supabase user + shared quota | Creates a Plaid Link token; with `itemId`, one for update mode; `purpose: "investments"` lists brokerages instead of banks |
 | `POST /v1/banking/connections` | Linked Supabase user + shared quota | Exchanges Link's public token, stores the sealed access token, returns the accounts |
 | `GET /v1/banking/connections` | Linked Supabase user + shared quota | Lists the caller's connected banks |
 | `POST /v1/banking/connections/{itemId}/sync` | Linked Supabase user + shared quota | Transactions added, changed and removed since the app's cursor, plus balances |
 | `DELETE /v1/banking/connections/{itemId}` | Linked Supabase user + shared quota | Removes the item at Plaid and deletes its stored token |
+| `POST /v1/banking/connections/{itemId}/holdings` | Linked Supabase user + shared quota | Investments: accounts, holdings (quantity, price, value, cost basis) and securities; empty lists when the item has no investment accounts |
+| `POST /v1/banking/connections/{itemId}/investment-transactions` | Linked Supabase user + shared quota | Investments: buys, sells, dividends, fees and transfers between `startDate` and `endDate`, 500 a page (`offset`, `nextOffset`, `hasMore`) |
 
 All responses use `Cache-Control: no-store` and include `X-Request-ID`. Errors have the documented `{ "error": { "code", "message", "requestId" } }` structure. Logs include the matched route, status, duration, and request ID, not tokens, query strings, or provider error details.
 

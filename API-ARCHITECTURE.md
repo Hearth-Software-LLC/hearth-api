@@ -126,6 +126,14 @@ Use `GET /v1/brands/logo?domain=example.com` if centralized lookup, provider sub
 
 Verify Logo.dev's current key model, attribution, caching, and redistribution terms before choosing direct delivery, proxying, or storing logos. Do not introduce an image storage service merely to duplicate the provider's CDN.
 
+### Ad copy for Hearth Ship (Claude)
+
+`POST /v1/marketing/ad-copy` writes ad copy for Hearth Ship's Social tab: two short lines for the ad image, a headline, the primary text and a button, in a few versions (`src/marketing/ad-copy.ts`). Hearth+ only (`createHearthPlusGate`, off unless `ENFORCE_ENTITLEMENTS`), with its own quota (`marketing`, 30 an hour per account).
+
+The request carries the app's App Store listing, the campaign brief, audience and tone, and the platforms the ads run on with their character limits, so changing a limit needs no deploy. Claude (Sonnet by default, `MARKETING_MODEL` to change it) answers through a forced tool call. Every field is checked against the tightest limit among the platforms; anything too long gets one follow-up call that shortens only those fields, and whatever is still too long comes back listed in `tooLong`, never cut. Nothing is stored; only status, latency, token counts and the app id are logged, and no account id goes to Anthropic.
+
+Hearth Ship signs in with `scripts/dev-session.ts` (`npm run dev-session`), which makes a one-time magic link with the secret key and redeems it at once, for an account chosen from Test Plans. It grants nothing beyond what holding the secret key already does.
+
 ### Food Data Providers
 
 Start with one provider selected for the actual workflow: nutrient reference data, packaged-food/barcode lookup, and recipe search are different requirements. Add another only for a demonstrated coverage gap.

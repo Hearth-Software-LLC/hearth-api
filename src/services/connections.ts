@@ -10,10 +10,18 @@ import { ApiError } from '../errors.js';
  * Backed by Supabase's REST API with a server-only secret key; the table has row-level
  * security on and no policies, so app-facing keys can't read it.
  */
-export type StoredConnection = { itemId: string; institution: string; sealedToken: string; createdAt: string };
+export type ConnectionProduct = 'transactions' | 'investments';
+export type StoredConnection = {
+  itemId: string;
+  institution: string;
+  sealedToken: string;
+  createdAt: string;
+  /** What the item was linked for. Rows from before investments read as transactions. */
+  products: ConnectionProduct[];
+};
 
 export type ConnectionStore = {
-  save: (ownerId: string, connection: Omit<StoredConnection, 'createdAt'>) => Promise<void>;
+  save: (ownerId: string, connection: Omit<StoredConnection, 'createdAt' | 'products'> & { products?: ConnectionProduct[] }) => Promise<void>;
   get: (ownerId: string, itemId: string) => Promise<StoredConnection | undefined>;
   list: (ownerId: string) => Promise<Omit<StoredConnection, 'sealedToken'>[]>;
   remove: (ownerId: string, itemId: string) => Promise<void>;
@@ -24,7 +32,10 @@ const rowSchema = z.object({
   institution: z.string(),
   access_token_sealed: z.string().optional(),
   created_at: z.string(),
+  products: z.array(z.enum(['transactions', 'investments'])).nullish(),
 });
+const productsOf = (row: { products?: ConnectionProduct[] | null | undefined }): ConnectionProduct[] =>
+  row.products && row.products.length > 0 ? row.products : ['transactions'];
 
 export function createConnectionStore(config: Config, fetcher: typeof fetch = fetch): ConnectionStore | undefined {
   if (!config.SUPABASE_URL || !config.SUPABASE_SECRET_KEY) return undefined;
@@ -65,25 +76,31 @@ export function createConnectionStore(config: Config, fetcher: typeof fetch = fe
           owner_id: ownerId,
           institution: connection.institution,
           access_token_sealed: connection.sealedToken,
+          products: connection.products ?? ['transactions'],
           updated_at: new Date().toISOString(),
         }),
       });
     },
     async get(ownerId, itemId) {
       const rows = z.array(rowSchema).safeParse(await call(
-        `select=item_id,institution,access_token_sealed,created_at&owner_id=${eq(ownerId)}&item_id=${eq(itemId)}&limit=1`,
+        `select=item_id,institution,access_token_sealed,created_at,products&owner_id=${eq(ownerId)}&item_id=${eq(itemId)}&limit=1`,
       ));
       if (!rows.success) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Bank connections are temporarily unavailable');
       const row = rows.data[0];
       if (!row?.access_token_sealed) return undefined;
-      return { itemId: row.item_id, institution: row.institution, sealedToken: row.access_token_sealed, createdAt: row.created_at };
+      return {
+        itemId: row.item_id, institution: row.institution, sealedToken: row.access_token_sealed,
+        createdAt: row.created_at, products: productsOf(row),
+      };
     },
     async list(ownerId) {
       const rows = z.array(rowSchema).safeParse(await call(
-        `select=item_id,institution,created_at&owner_id=${eq(ownerId)}&order=created_at.asc`,
+        `select=item_id,institution,created_at,products&owner_id=${eq(ownerId)}&order=created_at.asc`,
       ));
       if (!rows.success) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Bank connections are temporarily unavailable');
-      return rows.data.map((row) => ({ itemId: row.item_id, institution: row.institution, createdAt: row.created_at }));
+      return rows.data.map((row) => ({
+        itemId: row.item_id, institution: row.institution, createdAt: row.created_at, products: productsOf(row),
+      }));
     },
     async remove(ownerId, itemId) {
       await call(`owner_id=${eq(ownerId)}&item_id=${eq(itemId)}`, { method: 'DELETE', headers: { Prefer: 'return=minimal' } });

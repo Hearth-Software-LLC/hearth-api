@@ -37,7 +37,7 @@ import type { HearkenService } from './hearken/service.js';
 import { createDatabase } from './hearken/db.js';
 import { createApnsSender } from './integrations/apns.js';
 import { appAccess, effectiveEntitlements } from './services/subscriptions.js';
-import { createEntitlementGate, loadEntitlements } from './services/entitlements.js';
+import { createEntitlementGate, createHearthPlusGate, loadEntitlements } from './services/entitlements.js';
 import type { EntitlementSource } from './services/entitlements.js';
 import type { Sql } from 'postgres';
 import { createReportStore } from './services/reports.js';
@@ -45,6 +45,8 @@ import type { ReportStore } from './services/reports.js';
 import { registerReports } from './routes/v1/reports.js';
 import { registerAccount } from './routes/v1/account.js';
 import { registerEmber } from './ember/routes.js';
+import { registerAdCopy } from './marketing/ad-copy.js';
+import type { AdCopyDependencies } from './marketing/ad-copy.js';
 import type { EmberDependencies } from './ember/routes.js';
 import { registerEmberSpeech } from './ember/speech.js';
 import { registerEmberUnderstand } from './ember/understand.js';
@@ -85,6 +87,8 @@ export type AppOptions = {
   emberUnderstand?: Partial<EmberUnderstandDependencies>;
   /** Caloma's intercom wake-up relay. Built from DATABASE_URL and the APNS_* settings when not given. */
   calomaIntercom?: Partial<CalomaIntercomDependencies>;
+  /** Ad copy for Hearth Ship's Social tab (POST /v1/marketing/ad-copy). Reads ANTHROPIC_API_KEY when not given. */
+  adCopy?: Partial<AdCopyDependencies>;
   /** Speech-to-text for Ember on Apple Watch (POST /v1/ember/transcribe). Reads GOOGLE_TTS_API_KEY when not given. */
   emberTranscribe?: Partial<EmberTranscribeDependencies>;
 };
@@ -95,6 +99,8 @@ type RequestLog = {
   route: string;
   status: number;
   durationMs: number;
+  /** The `error.code` a 4xx/5xx answered with (never its message or details). */
+  errorCode?: string;
 };
 
 export function createApp(options: AppOptions = {}) {
@@ -115,12 +121,14 @@ export function createApp(options: AppOptions = {}) {
     context.header('X-Request-ID', requestId);
     context.header('Cache-Control', 'no-store');
     await next();
+    const errorCode = context.get('errorCode');
     logger({
       requestId,
       method: context.req.method,
       route: context.req.routePath ?? 'unmatched',
       status: context.res.status,
       durationMs: Math.round(performance.now() - startedAt),
+      ...(errorCode ? { errorCode } : {}),
     });
   });
   app.use('*', secureHeaders());
@@ -130,12 +138,14 @@ export function createApp(options: AppOptions = {}) {
       error = new ApiError(400, 'INVALID_REQUEST', 'Request body is invalid');
     }
     if (error instanceof ApiError) {
+      context.set('errorCode', error.code);
       if (error.status === 401) context.header('WWW-Authenticate', 'Bearer');
       if (error.retryAfter !== undefined) context.header('Retry-After', String(error.retryAfter));
       return context.json({
         error: { code: error.code, message: error.message, requestId: context.get('requestId') },
       }, error.status);
     }
+    context.set('errorCode', 'INTERNAL_ERROR');
     return context.json({
       error: {
         code: 'INTERNAL_ERROR',
@@ -144,13 +154,13 @@ export function createApp(options: AppOptions = {}) {
       },
     }, 500);
   });
-  app.notFound((context) => context.json({
+  app.notFound((context) => (context.set('errorCode', 'RESOURCE_NOT_FOUND'), context.json({
     error: {
       code: 'RESOURCE_NOT_FOUND',
       message: 'Route not found',
       requestId: context.get('requestId'),
     },
-  }, 404));
+  }, 404)));
 
   app.openapi(createRoute({
     method: 'get',
@@ -273,6 +283,15 @@ export function createApp(options: AppOptions = {}) {
     fetcher: options.fetcher ?? fetch,
     ...(process.env.EMBER_MODEL_QUICK ? { model: process.env.EMBER_MODEL_QUICK.trim() } : {}),
     ...options.emberUnderstand,
+  });
+  // Ad copy for Hearth Ship's Social tab (Claude, forced tool call; Hearth+ only).
+  registerAdCopy(app, {
+    reserveQuota,
+    requireHearthPlus: createHearthPlusGate(config.ENFORCE_ENTITLEMENTS, entitlementSource),
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY?.trim() || undefined,
+    fetcher: options.fetcher ?? fetch,
+    ...(process.env.MARKETING_MODEL ? { model: process.env.MARKETING_MODEL.trim() } : {}),
+    ...options.adCopy,
   });
   // What was said to Ember on Apple Watch (Google Cloud Speech-to-Text; watchOS has no speech recognition).
   registerEmberTranscribe(app, {

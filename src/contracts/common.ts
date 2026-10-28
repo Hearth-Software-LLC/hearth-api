@@ -13,5 +13,7 @@ export type ApiEnvironment = {
     requestId: string;
     userId: string;
     isAnonymous: boolean;
+    /** The error code a failed request answered with, for the request log. */
+    errorCode: string | undefined;
   };
 };

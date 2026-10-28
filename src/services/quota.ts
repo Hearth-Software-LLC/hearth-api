@@ -4,7 +4,7 @@ import { Ratelimit } from '@upstash/ratelimit';
 import type { Config } from '../config.js';
 import { ApiError } from '../errors.js';
 
-export type ReserveQuota = (userId: string, operation: 'foods' | 'logos' | 'restaurants' | 'plaid-link' | 'banking' | 'ember' | 'ember-speech') => Promise<void>;
+export type ReserveQuota = (userId: string, operation: 'foods' | 'logos' | 'restaurants' | 'plaid-link' | 'banking' | 'ember' | 'ember-speech' | 'marketing') => Promise<void>;
 
 export function createQuota(config: Config): ReserveQuota {
   if (!config.UPSTASH_REDIS_REST_URL || !config.UPSTASH_REDIS_REST_TOKEN) {
@@ -50,6 +50,15 @@ export function createQuota(config: Config): ReserveQuota {
     ephemeralCache: false,
     timeout: 3000,
   });
+  // Writing ad copy is one or two Sonnet calls; a campaign needs a handful.
+  const marketingUserLimit = new Ratelimit({
+    redis,
+    limiter: Ratelimit.fixedWindow(30, '1 h'),
+    prefix: `${config.RATE_LIMIT_PREFIX}:marketing-user`,
+    analytics: false,
+    ephemeralCache: false,
+    timeout: 3000,
+  });
   const plaidGlobalLimit = new Ratelimit({
     redis,
     limiter: Ratelimit.fixedWindow(100, '1 h'),
@@ -73,7 +82,7 @@ export function createQuota(config: Config): ReserveQuota {
   return async (userId, operation) => {
     try {
       const identifier = createHash('sha256').update(userId).digest('hex');
-      const limiter = operation === 'plaid-link' ? plaidUserLimit : userLimit;
+      const limiter = operation === 'plaid-link' ? plaidUserLimit : operation === 'marketing' ? marketingUserLimit : userLimit;
       const userResult = await limiter.limit(`${operation}:${identifier}`);
       if (userResult.reason === 'timeout') throw new Error('Quota timeout');
       if (!userResult.success) {

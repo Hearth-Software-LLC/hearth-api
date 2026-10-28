@@ -71,8 +71,8 @@ function setup(options: { connections?: string[] } = {}) {
   const items = options.connections ?? ['item-1', 'item-2'];
   const connectionStore = {
     save: vi.fn(),
-    list: vi.fn(async () => items.map((itemId) => ({ itemId, institution: 'Bank', createdAt: '2026-10-01T00:00:00Z' }))),
-    get: vi.fn(async (_owner: string, itemId: string) => ({ itemId, institution: 'Bank', sealedToken: `sealed-${itemId}`, createdAt: '2026-10-01T00:00:00Z' })),
+    list: vi.fn(async () => items.map((itemId) => ({ itemId, institution: 'Bank', createdAt: '2026-10-01T00:00:00Z', products: ['transactions' as const] }))),
+    get: vi.fn(async (_owner: string, itemId: string) => ({ itemId, institution: 'Bank', sealedToken: `sealed-${itemId}`, createdAt: '2026-10-01T00:00:00Z', products: ['transactions' as const] })),
     remove: vi.fn().mockResolvedValue(undefined),
   } satisfies ConnectionStore;
   const reports = { create: vi.fn(), removeByReporter: vi.fn().mockResolvedValue(undefined) } satisfies ReportStore;

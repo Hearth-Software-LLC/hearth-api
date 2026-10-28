@@ -220,3 +220,25 @@ describe('official Plaid SDK adapter', () => {
     expect(createPlaidLinkClient(readConfig({}))).toBeUndefined();
   });
 });
+describe('Request log', () => {
+  it('records the error code of a failed request, never its message', async () => {
+    const plaidLinkClient = vi.fn<CreateLinkToken>().mockRejectedValue(
+      Object.assign(new Error('bad keys'), { response: { status: 400, data: { error_type: 'INVALID_INPUT', error_code: 'INVALID_API_KEYS' } } }),
+    );
+    const logs: Record<string, unknown>[] = [];
+    const app = createApp({
+      config, verifyToken: async () => 'verified-user-123', reserveQuota: vi.fn().mockResolvedValue(undefined),
+      plaidLinkClient, logger: (record) => { logs.push(record as Record<string, unknown>); },
+    });
+    const response = await app.request(path, request);
+    expect(response.status).toBe(503);
+    expect(logs.at(-1)).toMatchObject({ route: '/v1/banking/link-token', status: 503, errorCode: 'PROVIDER_CONFIGURATION_ERROR' });
+    expect(JSON.stringify(logs)).not.toMatch(/bad keys|Plaid is not available/);
+  });
+
+  it('leaves the code out of successful requests', async () => {
+    const { app, logs } = setup();
+    await app.request(path, request);
+    expect(logs.at(-1)).not.toHaveProperty('errorCode');
+  });
+});

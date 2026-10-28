@@ -9,7 +9,8 @@ import { ApiError } from '../../errors.js';
 import { createLinkToken, isPlaidCode, plaidFailure } from '../../integrations/plaid.js';
 import type { CreateLinkToken, PlaidDataClient } from '../../integrations/plaid.js';
 import {
-  accountsSchema, domain, exchangeSchema, institutionSchema, parsePlaid, syncSchema, toAccount, toTransaction,
+  accountsSchema, domain, exchangeSchema, holdingsSchema, institutionSchema, investmentTransactionsSchema, parsePlaid,
+  syncSchema, toAccount, toHolding, toInvestmentAccount, toInvestmentTransaction, toSecurity, toTransaction,
 } from '../../integrations/plaid-shape.js';
 import type { ConnectionStore } from '../../services/connections.js';
 import type { TokenSeal } from '../../services/token-seal.js';
@@ -28,6 +29,8 @@ export type BankingDependencies = {
 
 /** Pages of /transactions/sync per request. The app calls again while `hasMore` is true. */
 const SYNC_PAGES_PER_REQUEST = 5;
+/** Investment transactions per page (Plaid's maximum). The app calls again while `hasMore` is true. */
+const INVESTMENT_PAGE = 500;
 
 const itemIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
 const itemParams = z.object({ itemId: itemIdSchema.openapi({ param: { name: 'itemId', in: 'path' } }) });
@@ -41,12 +44,34 @@ const transactionSchema = z.object({
   logoUrl: z.string().nullable(), merchantDomain: z.string().nullable(),
   city: z.string().nullable(), address: z.string().nullable(), latitude: z.number().nullable(), longitude: z.number().nullable(),
 }).openapi('BankTransaction');
-const connectionSchema = z.object({ itemId: z.string(), institution: z.string(), createdAt: z.string() }).openapi('BankConnection');
+const productSchema = z.enum(['transactions', 'investments']);
+const connectionSchema = z.object({
+  itemId: z.string(), institution: z.string(), createdAt: z.string(), products: z.array(productSchema),
+}).openapi('BankConnection');
+
+const investmentAccountSchema = z.object({
+  id: z.string(), name: z.string(), mask: z.string(),
+  kind: z.enum(['401k', 'ira', 'roth', 'brokerage', 'education', 'hsa', 'other']), balanceCents: z.number().int(),
+}).openapi('InvestmentAccount');
+const securitySchema = z.object({
+  id: z.string(), ticker: z.string().nullable(), name: z.string(), type: z.string(), isCash: z.boolean(),
+  closePrice: z.number().nullable(), closePriceDate: z.string().nullable(),
+}).openapi('Security');
+const holdingSchema = z.object({
+  accountId: z.string(), securityId: z.string(), quantity: z.number(), price: z.number(), priceDate: z.string().nullable(),
+  valueCents: z.number().int(), costBasisCents: z.number().int().nullable(),
+}).openapi('Holding');
+const investmentTransactionSchema = z.object({
+  id: z.string(), accountId: z.string(), securityId: z.string().nullable(), date: z.string(), name: z.string(),
+  kind: z.string(), subtype: z.string().nullable(), quantity: z.number(), price: z.number(),
+  amountCents: z.number().int(), cashIn: z.boolean(), feesCents: z.number().int(),
+}).openapi('InvestmentTransaction');
+const isoDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 const errors = (...codes: (400 | 401 | 402 | 403 | 404 | 409 | 429 | 502 | 503 | 504)[]) => Object.fromEntries(codes.map((code) => [
   code, { description: {
     400: 'Invalid request', 401: 'Invalid or missing token', 402: 'Needs Suffice Plus or Hearth+ (only when ENFORCE_ENTITLEMENTS is on)', 403: 'A durable signed-in identity is required',
-    404: 'Connection not found', 409: 'The bank needs the person to sign in again (use update mode)',
+    404: 'Connection not found', 409: 'The bank needs the person to sign in again (use update mode), or the institution doesn\'t share investments',
     429: 'User quota exceeded', 502: 'Plaid failed or returned invalid data',
     503: 'Required service unavailable or provider quota exhausted', 504: 'Plaid timed out',
   }[code], content: { 'application/json': { schema: errorSchema } } },
@@ -82,6 +107,8 @@ export function registerBanking(
   app.use('/v1/banking/link-token', jsonOnly, smallBody(1024));
   app.use('/v1/banking/connections', jsonOnly, smallBody(2048));
   app.use('/v1/banking/connections/:itemId/sync', jsonOnly, smallBody(8192));
+  app.use('/v1/banking/connections/:itemId/holdings', jsonOnly, smallBody(1024));
+  app.use('/v1/banking/connections/:itemId/investment-transactions', jsonOnly, smallBody(1024));
 
   /** Everything a connection route needs, or a 503 naming what's missing. */
   function connected() {
@@ -103,11 +130,13 @@ export function registerBanking(
     method: 'post',
     path: '/v1/banking/link-token',
     summary: 'Create a fresh Plaid Link token for the authenticated user',
-    description: 'With `itemId`, a token for update mode: the person signs in again to a bank that needs it.',
+    description: 'With `itemId`, a token for update mode: the person signs in again to a bank that needs it. `purpose` "investments" lists brokerages and retirement providers instead of banks.',
     tags: ['Banking'],
     security: [{ BearerAuth: [] }],
     request: {
-      body: { required: true, content: { 'application/json': { schema: z.object({ itemId: itemIdSchema.optional() }).strict().openapi('CreatePlaidLinkToken') } } },
+      body: { required: true, content: { 'application/json': { schema: z.object({
+        itemId: itemIdSchema.optional(), purpose: productSchema.optional(),
+      }).strict().openapi('CreatePlaidLinkToken') } } },
     },
     responses: {
       200: {
@@ -123,11 +152,11 @@ export function registerBanking(
     if (!linkClient || !config.PLAID_CLIENT_ID || !config.PLAID_SECRET || !config.PLAID_PRODUCTS) {
       throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', 'Plaid is not configured');
     }
-    const { itemId } = context.req.valid('json');
+    const { itemId, purpose } = context.req.valid('json');
     const userId = context.get('userId');
     await reserveQuota(userId, 'plaid-link');
     const updateToken = itemId ? (await accessToken(userId, itemId)).token : undefined;
-    return context.json(await createLinkToken(config, userId, linkClient, updateToken), 200);
+    return context.json(await createLinkToken(config, userId, linkClient, updateToken, purpose), 200);
   });
 
   // MARK: Connections
@@ -142,13 +171,16 @@ export function registerBanking(
     request: {
       body: { required: true, content: { 'application/json': { schema: z.object({
         publicToken: z.string().min(1).max(512),
+        /** The Link token's purpose, so the connection is listed in the right place. */
+        purpose: productSchema.optional(),
       }).strict().openapi('CreateBankConnection') } } },
     },
     responses: {
       201: {
         description: 'Connected',
         content: { 'application/json': { schema: z.object({
-          itemId: z.string(), institution: z.string(), institutionDomain: z.string().nullable(), accounts: z.array(accountSchema),
+          itemId: z.string(), institution: z.string(), institutionDomain: z.string().nullable(),
+          products: z.array(productSchema), accounts: z.array(accountSchema),
         }).openapi('NewBankConnection') } },
       },
       ...errors(400, 401, 402, 403, 429, 502, 503, 504),
@@ -156,9 +188,10 @@ export function registerBanking(
   }), async (context) => {
     await requireAccess(context.get('userId'), 'suffice');
     const { dataClient, store, seal } = connected();
-    const { publicToken } = context.req.valid('json');
+    const { publicToken, purpose } = context.req.valid('json');
     const userId = context.get('userId');
     await reserveQuota(userId, 'banking');
+    const products = [purpose ?? 'transactions'] as const;
 
     const signal = AbortSignal.timeout(20_000);
     try {
@@ -180,8 +213,11 @@ export function registerBanking(
         itemId: exchange.item_id,
         institution,
         sealedToken: seal.seal(exchange.access_token, userId, exchange.item_id),
+        products: [...products],
       });
-      return context.json({ itemId: exchange.item_id, institution, institutionDomain, accounts: accounts.accounts.map(toAccount) }, 201);
+      return context.json({
+        itemId: exchange.item_id, institution, institutionDomain, products: [...products], accounts: accounts.accounts.map(toAccount),
+      }, 201);
     } catch (error) {
       throw plaidFailure(error, signal);
     }
@@ -271,6 +307,104 @@ export function registerBanking(
         hasMore: result.hasMore,
       }, 200);
     } catch (error) {
+      throw plaidFailure(error, signal);
+    }
+  });
+
+  // MARK: Investments
+
+  app.openapi(createRoute({
+    method: 'post',
+    path: '/v1/banking/connections/{itemId}/holdings',
+    summary: 'What a brokerage connection holds today, with its accounts and securities',
+    description: 'Wraps Plaid /investments/holdings/get. Prices are the institution\'s, usually as of the last market close. Nothing is stored server-side. A connection with no investment accounts returns empty lists.',
+    tags: ['Investments'],
+    security: [{ BearerAuth: [] }],
+    request: {
+      params: itemParams,
+      body: { required: true, content: { 'application/json': { schema: z.object({}).strict().openapi('GetHoldings') } } },
+    },
+    responses: {
+      200: {
+        description: 'Holdings',
+        content: { 'application/json': { schema: z.object({
+          accounts: z.array(investmentAccountSchema), holdings: z.array(holdingSchema), securities: z.array(securitySchema),
+        }).openapi('InvestmentHoldings') } },
+      },
+      ...errors(400, 401, 402, 403, 404, 409, 429, 502, 503, 504),
+    },
+  }), async (context) => {
+    await requireAccess(context.get('userId'), 'suffice');
+    const { dataClient } = connected();
+    const { itemId } = context.req.valid('param');
+    const userId = context.get('userId');
+    await reserveQuota(userId, 'banking');
+    const { token } = await accessToken(userId, itemId);
+
+    const signal = AbortSignal.timeout(20_000);
+    try {
+      const result = parsePlaid(holdingsSchema, await dataClient.getInvestmentHoldings(token, signal));
+      const investing = result.accounts.filter((account) => account.type === 'investment' || account.type === 'brokerage');
+      return context.json({
+        accounts: investing.map(toInvestmentAccount),
+        holdings: result.holdings.map(toHolding),
+        securities: result.securities.map(toSecurity),
+      }, 200);
+    } catch (error) {
+      if (isPlaidCode(error, ['NO_INVESTMENT_ACCOUNTS'])) return context.json({ accounts: [], holdings: [], securities: [] }, 200);
+      throw plaidFailure(error, signal);
+    }
+  });
+
+  app.openapi(createRoute({
+    method: 'post',
+    path: '/v1/banking/connections/{itemId}/investment-transactions',
+    summary: 'Buys, sells, dividends, fees and transfers between two dates',
+    description: 'Wraps Plaid /investments/transactions/get, up to 500 a page. Call again with `offset` = `nextOffset` while `hasMore` is true. Plaid keeps up to 24 months.',
+    tags: ['Investments'],
+    security: [{ BearerAuth: [] }],
+    request: {
+      params: itemParams,
+      body: { required: true, content: { 'application/json': { schema: z.object({
+        startDate: isoDay, endDate: isoDay, offset: z.number().int().min(0).max(100_000).optional(),
+      }).strict().openapi('GetInvestmentTransactions') } } },
+    },
+    responses: {
+      200: {
+        description: 'A page of investment transactions, newest first',
+        content: { 'application/json': { schema: z.object({
+          transactions: z.array(investmentTransactionSchema), securities: z.array(securitySchema),
+          nextOffset: z.number().int(), hasMore: z.boolean(),
+        }).openapi('InvestmentTransactions') } },
+      },
+      ...errors(400, 401, 402, 403, 404, 409, 429, 502, 503, 504),
+    },
+  }), async (context) => {
+    await requireAccess(context.get('userId'), 'suffice');
+    const { dataClient } = connected();
+    const { itemId } = context.req.valid('param');
+    const { startDate, endDate, offset = 0 } = context.req.valid('json');
+    if (startDate > endDate) throw new ApiError(400, 'INVALID_REQUEST', 'startDate must not be after endDate');
+    const userId = context.get('userId');
+    await reserveQuota(userId, 'banking');
+    const { token } = await accessToken(userId, itemId);
+
+    const signal = AbortSignal.timeout(30_000);
+    try {
+      const result = parsePlaid(investmentTransactionsSchema, await dataClient.getInvestmentTransactions(
+        token, { startDate, endDate, offset, count: INVESTMENT_PAGE }, signal,
+      ));
+      const nextOffset = offset + result.investment_transactions.length;
+      return context.json({
+        transactions: result.investment_transactions.map(toInvestmentTransaction),
+        securities: result.securities.map(toSecurity),
+        nextOffset,
+        hasMore: result.investment_transactions.length > 0 && nextOffset < result.total_investment_transactions,
+      }, 200);
+    } catch (error) {
+      if (isPlaidCode(error, ['NO_INVESTMENT_ACCOUNTS'])) {
+        return context.json({ transactions: [], securities: [], nextOffset: offset, hasMore: false }, 200);
+      }
       throw plaidFailure(error, signal);
     }
   });

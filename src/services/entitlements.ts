@@ -34,6 +34,17 @@ export function createEntitlementGate(enforce: boolean, source: EntitlementSourc
   };
 }
 
+/** Throws 402 ENTITLEMENT_REQUIRED unless the caller has Hearth+ itself (own or household); off unless enforced. */
+export function createHearthPlusGate(enforce: boolean, source: EntitlementSource | undefined): (userId: string) => Promise<void> {
+  if (!enforce) return async () => undefined;
+  return async (userId) => {
+    const entitlements = await loadEntitlements(source, userId);
+    if (!entitlements.some((entry) => entry.id === 'hearth_plus')) {
+      throw new ApiError(402, 'ENTITLEMENT_REQUIRED', 'This needs Hearth+');
+    }
+  };
+}
+
 /** Middleware form of a gate, for whole route groups. */
 export function requireApp(gate: EntitlementGate, app: HearthApp): MiddlewareHandler<ApiEnvironment> {
   return async (context, next) => {

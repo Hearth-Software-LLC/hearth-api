@@ -1,4 +1,4 @@
-import { Configuration, PlaidApi, PlaidEnvironments } from 'plaid';
+import { Configuration, PlaidApi, PlaidEnvironments, Products } from 'plaid';
 import type { LinkTokenCreateRequest } from 'plaid';
 import { z } from 'zod';
 import type { Config } from '../config.js';
@@ -16,7 +16,18 @@ export type PlaidDataClient = {
   getInstitution: (institutionId: string, countryCodes: Config['PLAID_COUNTRY_CODES'], signal: AbortSignal) => Promise<unknown>;
   syncTransactions: (accessToken: string, cursor: string | undefined, signal: AbortSignal) => Promise<unknown>;
   removeItem: (accessToken: string, signal: AbortSignal) => Promise<unknown>;
+  /** Investments: what each account holds today, with the securities it refers to. */
+  getInvestmentHoldings: (accessToken: string, signal: AbortSignal) => Promise<unknown>;
+  /** Investments: buys, sells, dividends, fees and transfers between two dates (yyyy-MM-dd). */
+  getInvestmentTransactions: (
+    accessToken: string,
+    range: { startDate: string; endDate: string; offset: number; count: number },
+    signal: AbortSignal,
+  ) => Promise<unknown>;
 };
+
+/** What a Link token is for: a bank (the configured PLAID_PRODUCTS) or a brokerage. */
+export type LinkPurpose = 'transactions' | 'investments';
 
 const tokenSchema = z.object({
   link_token: z.string().min(1).max(4096),
@@ -82,6 +93,15 @@ export function createPlaidDataClient(config: Config): PlaidDataClient | undefin
       (await client.transactionsSync({ access_token: accessToken, ...(cursor ? { cursor } : {}), count: 100 }, { signal })).data,
     removeItem: async (accessToken, signal) =>
       (await client.itemRemove({ access_token: accessToken }, { signal })).data,
+    getInvestmentHoldings: async (accessToken, signal) =>
+      (await client.investmentsHoldingsGet({ access_token: accessToken }, { signal })).data,
+    getInvestmentTransactions: async (accessToken, range, signal) =>
+      (await client.investmentsTransactionsGet({
+        access_token: accessToken,
+        start_date: range.startDate,
+        end_date: range.endDate,
+        options: { offset: range.offset, count: range.count },
+      }, { signal })).data,
   };
 }
 
@@ -89,17 +109,27 @@ export function createPlaidDataClient(config: Config): PlaidDataClient | undefin
  * A Link token for a new connection, or, with an access token, for update mode (the person
  * signs in to a bank that needs it again). The redirect URI is only sent when configured;
  * it's needed only for OAuth banks.
+ *
+ * `purpose` "investments" asks only for Plaid Investments, so Link lists brokerages and
+ * retirement providers; banks keep the configured PLAID_PRODUCTS.
  */
-export async function createLinkToken(config: Config, userId: string, client: CreateLinkToken, accessToken?: string) {
+export async function createLinkToken(
+  config: Config,
+  userId: string,
+  client: CreateLinkToken,
+  accessToken?: string,
+  purpose: LinkPurpose = 'transactions',
+) {
   if (!config.PLAID_PRODUCTS) {
     throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', 'Plaid is not configured');
   }
+  const products = purpose === 'investments' ? [Products.Investments] : config.PLAID_PRODUCTS;
   const signal = AbortSignal.timeout(8000);
   try {
     const result = await client({
       user: { client_user_id: userId },
       client_name: config.PLAID_CLIENT_NAME,
-      ...(accessToken ? { access_token: accessToken } : { products: config.PLAID_PRODUCTS }),
+      ...(accessToken ? { access_token: accessToken } : { products }),
       country_codes: config.PLAID_COUNTRY_CODES,
       language: 'en',
       ...(config.PLAID_REDIRECT_URI ? { redirect_uri: config.PLAID_REDIRECT_URI } : {}),
@@ -142,6 +172,12 @@ export function plaidFailure(error: unknown, signal: AbortSignal): ApiError {
   }
   if (plaidCode === 'ITEM_NOT_FOUND' || plaidCode === 'INVALID_ACCESS_TOKEN') {
     return new ApiError(404, 'CONNECTION_NOT_FOUND', 'That bank connection no longer exists');
+  }
+  if (plaidCode === 'PRODUCTS_NOT_SUPPORTED' || plaidCode === 'ADDITIONAL_CONSENT_REQUIRED') {
+    return new ApiError(409, 'PRODUCT_NOT_SUPPORTED', 'This institution doesn\'t share investments');
+  }
+  if (plaidCode === 'PRODUCT_NOT_READY') {
+    return new ApiError(409, 'PRODUCT_NOT_READY', 'Your brokerage is still sending its data. Try again in a minute.', 60);
   }
   return new ApiError(502, 'UPSTREAM_UNAVAILABLE', 'Plaid is temporarily unavailable');
 }
