@@ -52,7 +52,7 @@ function write(app: ReturnType<typeof setup>['app'], payload: unknown = body) {
 }
 
 describe('POST /v1/marketing/ad-copy', () => {
-  it('writes versions through a forced tool call, sized to the tightest platform', async () => {
+  it('writes versions through the submit tool, sized to the tightest platform', async () => {
     const fetcher = vi.fn<typeof fetch>(async () => claudeReply([good, good, good]));
     const { app, reserveQuota } = setup(fetcher);
     const response = await write(app);
@@ -69,7 +69,8 @@ describe('POST /v1/marketing/ad-copy', () => {
     expect(String(url)).toBe('https://api.anthropic.com/v1/messages');
     const sent = JSON.parse(String(init?.body));
     expect(sent.model).toBe('claude-sonnet-5-5');
-    expect(sent.tool_choice).toEqual({ type: 'tool', name: 'submit_versions' });
+    expect(sent.tool_choice).toEqual({ type: 'auto' });
+    expect(sent.tools[0].name).toBe('submit_versions');
     expect(sent.messages[0].content).toContain('Family meal planning');
     expect(sent.messages[0].content).toContain('headline: at most 34');
     expect(sent.messages[0].content).toContain('- Feed the whole crew.');
@@ -181,5 +182,10 @@ describe('ad copy upstream errors', () => {
     const response = await write(setup(fetcher).app);
     expect(response.status).toBe(502);
     expect(JSON.stringify(await response.json())).toContain('not_found_error: model: claude-nope');
+  });
+
+  it('answers 502 when Claude replies without calling the tool', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ content: [{ type: 'text', text: 'Here are some ads…' }] }));
+    expect((await write(setup(fetcher).app)).status).toBe(502);
   });
 });

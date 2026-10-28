@@ -8,7 +8,7 @@ import type { ReserveQuota } from '../services/quota.js';
 // POST /v1/marketing/ad-copy — ad copy for Hearth Ship's Social tab (Hearth Ship › Social ads plan).
 //
 // Hearth Ship sends a campaign's brief, the app's App Store listing and the platforms the ads run
-// on, each with its character limits. Claude writes a few versions through a forced tool call:
+// on, each with its character limits. Claude writes a few versions through a tool call:
 // two short lines for the image, a headline, the primary text and a button. Every field is then
 // measured against the tightest limit it has to meet; anything too long gets one follow-up call
 // that shortens only those fields, and whatever is still too long comes back flagged, never cut.
@@ -141,7 +141,7 @@ export const SUBMIT_TOOL = {
 export function adCopySystemPrompt(): string {
   return [
     'You write paid social ads for small, well-made iPhone apps from one maker, sold under the Hearth name.',
-    'You write each version by calling submit_versions.',
+    'Answer only by calling submit_versions once, with every version. Write nothing else.',
     '',
     'House voice:',
     '- Plain, concrete words about what the app does for this person. No hype, no superlatives, no "revolutionary", "game-changer" or "unlock".',
@@ -182,7 +182,9 @@ export function adCopyPayload(body: AdCopyRequest, model: string, limits: AdLimi
     max_tokens: 1600,
     system: [{ type: 'text', text: adCopySystemPrompt(), cache_control: { type: 'ephemeral' } }],
     tools: [SUBMIT_TOOL],
-    tool_choice: { type: 'tool', name: SUBMIT_TOOL.name },
+    // Newer models (Sonnet 5.5) refuse a forced tool call ("tool" and "any"), so the model is
+    // told to answer only through the tool, and the reply is checked for it.
+    tool_choice: { type: 'auto' },
     messages: [{ role: 'user', content: adCopyUserMessage(body, limits) }] as Array<Record<string, unknown>>,
   };
 }
