@@ -199,8 +199,8 @@ export function registerAdCopy(app: OpenAPIHono<ApiEnvironment>, dependencies: A
   const model = dependencies.model ?? DEFAULT_MODEL;
   const log = dependencies.log ?? ((record) => { if (process.env.NODE_ENV !== 'test') console.info(JSON.stringify(record)); });
 
-  async function call(payload: Record<string, unknown>) {
-    const upstream = await fetcher('https://api.anthropic.com/v1/messages', {
+  function send(payload: Record<string, unknown>) {
+    return fetcher('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -208,11 +208,32 @@ export function registerAdCopy(app: OpenAPIHono<ApiEnvironment>, dependencies: A
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(45_000),
     }).catch(() => null);
+  }
+
+  /** Anthropic's error type and message (never the request's content). */
+  async function upstreamError(response: Response) {
+    const body = await response.json().catch(() => null) as { error?: { type?: string; message?: string } } | null;
+    return { type: body?.error?.type ?? 'unknown', message: (body?.error?.message ?? '').slice(0, 300) };
+  }
+
+  async function call(payload: Record<string, unknown>) {
+    let upstream = await send(payload);
+    // A model that thinks by default refuses a forced tool call; ask again with thinking off.
+    if (upstream && upstream.status === 400) {
+      const error = await upstreamError(upstream.clone());
+      if (/thinking|tool_choice/i.test(error.message)) {
+        log({ route: 'marketing.adCopy', upstreamStatus: 400, retry: 'thinking-disabled', error: error.message });
+        upstream = await send({ ...payload, thinking: { type: 'disabled' } });
+      }
+    }
     if (!upstream || !upstream.ok) {
-      log({ route: 'marketing.adCopy', upstreamStatus: upstream?.status ?? 'unreachable' });
-      throw new ApiError(502, 'UPSTREAM_FAILED', 'Claude could not write the ads');
+      const error = upstream ? await upstreamError(upstream) : { type: 'unreachable', message: '' };
+      log({ route: 'marketing.adCopy', upstreamStatus: upstream?.status ?? 'unreachable', errorType: error.type, error: error.message });
+      throw new ApiError(502, 'UPSTREAM_FAILED', error.message
+        ? `Claude could not write the ads (${upstream?.status} ${error.type}: ${error.message})`
+        : 'Claude could not write the ads');
     }
     const reply = await upstream.json().catch(() => null) as ClaudeReply | null;
     const block = reply?.content?.find((item) => item.type === 'tool_use' && item.name === SUBMIT_TOOL.name);

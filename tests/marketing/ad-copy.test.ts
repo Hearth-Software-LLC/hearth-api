@@ -146,3 +146,21 @@ describe('ad limits', () => {
     expect(message).toContain('benefit first');
   });
 });
+
+describe('ad copy upstream errors', () => {
+  it('asks again with thinking off when the model refuses a forced tool call', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ type: 'error', error: { type: 'invalid_request_error', message: 'Thinking may not be enabled when tool_choice forces tool use.' } }, { status: 400 }))
+      .mockResolvedValueOnce(claudeReply([good]));
+    const response = await write(setup(fetcher).app, { ...body, count: 1 });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(String(fetcher.mock.calls[1]![1]?.body)).thinking).toEqual({ type: 'disabled' });
+  });
+
+  it('says what Claude objected to', async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ type: 'error', error: { type: 'not_found_error', message: 'model: claude-nope' } }, { status: 404 }));
+    const response = await write(setup(fetcher).app);
+    expect(response.status).toBe(502);
+    expect(JSON.stringify(await response.json())).toContain('not_found_error: model: claude-nope');
+  });
+});
