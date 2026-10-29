@@ -241,6 +241,25 @@ export function createLibraryService(sql: Sql, options: { storage?: StudioStorag
       return row ? asset(row) : undefined;
     },
 
+    /** Where to PUT a team member's profile photo (at most 5 MB, an image). */
+    async startAvatarUpload(team: string, userId: string, input: { sha256: string; bytes: number; contentType: LibraryContentType }) {
+      if (!input.contentType.startsWith('image/')) throw new ApiError(422, 'NOT_AN_IMAGE', 'A profile photo has to be an image');
+      if (input.bytes > 5 * 1024 * 1024) throw new ApiError(422, 'FILE_TOO_LARGE', 'Profile photos can be up to 5 MB');
+      const path = `${team}/avatars/${userId}/${input.sha256}.${LIBRARY_TYPES[input.contentType]}`;
+      const upload = await storage().uploadUrl(path);
+      return { path, uploadUrl: upload.url, token: upload.token };
+    },
+
+    /** A signed link to a profile photo (a week). */
+    async avatarUrl(path: string) {
+      return storage().signedUrl(path, 7 * 86_400);
+    },
+
+    /** Removes a profile photo that's been replaced. */
+    async removeAvatar(path: string) {
+      await options.storage?.remove([path]).catch(() => undefined);
+    },
+
     async url(team: string, id: string, thumbnail: boolean) {
       const item = await this.get(team, id);
       if (!item) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Library item not found');

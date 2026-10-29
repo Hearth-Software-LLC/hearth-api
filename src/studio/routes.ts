@@ -71,6 +71,13 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
   const plans = () => required(dependencies.plans, 'Plans (REVENUECAT_SECRET_API_KEY, REVENUECAT_PROJECT_ID)');
   const apps = () => required(dependencies.apps, 'Apps from GitHub (GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY)');
 
+  /** A member with a signed link to their profile photo (null without one, or without storage). */
+  const view = async (member: Member) => {
+    const lib = dependencies.library();
+    const avatarUrl = member.avatarPath && lib ? await lib.avatarUrl(member.avatarPath).catch(() => null) : null;
+    return { ...memberView(member), avatarUrl };
+  };
+
   const gate = studioMiddleware(dependencies.team);
   // Joining is the one Studio call for someone not on the team yet.
   app.use('/v1/studio/*', async (context, next) => (/^\/v1\/studio\/invites\/[^/]+\/join$/.test(context.req.path) ? next() : gate(context, next)));
@@ -83,7 +90,7 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     responses: { 200: anyJson('Membership'), ...errors },
   }), async (context) => {
     const member = memberOf(context);
-    return context.json({ team: { id: member.teamId, name: member.teamName }, ...memberView(member) }, 200);
+    return context.json({ team: { id: member.teamId, name: member.teamName }, ...(await view(member)) }, 200);
   });
 
   app.openapi(route('Studio team', {
@@ -100,13 +107,42 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     const updated = input.displayName !== undefined
       ? await team().updateMember(member.teamId, member.userId, { displayName: input.displayName })
       : (await team().members(member.teamId)).find((entry) => entry.userId === member.userId)!;
-    return context.json({ team: { id: updated.teamId, name: updated.teamName }, ...memberView(updated) }, 200);
+    return context.json({ team: { id: updated.teamId, name: updated.teamName }, ...(await view(updated)) }, 200);
   });
 
   app.openapi(route('Studio team', {
     method: 'get', path: '/v1/studio/members', summary: 'Everyone on the team',
     responses: { 200: anyJson('Members'), ...errors },
-  }), async (context) => context.json({ members: (await team().members(teamOf(context))).map(memberView) }, 200));
+  }), async (context) => context.json({ members: await Promise.all((await team().members(teamOf(context))).map(view)) }, 200));
+
+  const avatarType = z.enum(['image/jpeg', 'image/png', 'image/webp', 'image/heic']);
+
+  app.openapi(route('Studio team', {
+    method: 'post', path: '/v1/studio/me/avatar/upload',
+    summary: 'Where to PUT your new profile photo (then PUT /v1/studio/me/avatar with its path)',
+    request: body(z.object({ sha256: sha, bytes: z.number().int().min(1), contentType: avatarType }).strict()),
+    responses: { 200: anyJson('Upload target'), ...errors },
+  }), async (context) => {
+    const member = memberOf(context);
+    return context.json(await library().startAvatarUpload(member.teamId, member.userId, context.req.valid('json')), 200);
+  });
+
+  app.openapi(route('Studio team', {
+    method: 'put', path: '/v1/studio/me/avatar', summary: 'Use an uploaded profile photo (path from the upload), or null to remove it',
+    request: body(z.object({ path: z.string().min(10).max(300).nullable() }).strict()),
+    responses: { 200: anyJson('Membership'), ...errors },
+  }), async (context) => {
+    const member = memberOf(context);
+    const { path } = context.req.valid('json');
+    // Only a photo this member uploaded for this team.
+    if (path !== null && !path.startsWith(`${member.teamId}/avatars/${member.userId}/`)) {
+      throw new ApiError(400, 'INVALID_REQUEST', 'That isn’t your uploaded photo');
+    }
+    const previous = await team().setAvatar(member.teamId, member.userId, path);
+    if (previous && previous !== path) await dependencies.library()?.removeAvatar(previous);
+    const updated = (await team().members(member.teamId)).find((entry) => entry.userId === member.userId)!;
+    return context.json({ team: { id: updated.teamId, name: updated.teamName }, ...(await view(updated)) }, 200);
+  });
 
   app.openapi(route('Studio team', {
     method: 'patch', path: '/v1/studio/members/{userId}', summary: 'What a member can do (owners only)',
@@ -119,7 +155,7 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     const owner = need(context, 'owner');
     const input = context.req.valid('json');
     const updated = await team().updateMember(owner.teamId, context.req.valid('param').userId, defined({ canPost: input.post, canPlans: input.plans, canAccounts: input.accounts }));
-    return context.json(memberView(updated), 200);
+    return context.json(await view(updated), 200);
   });
 
   app.openapi(route('Studio team', {
@@ -154,7 +190,7 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     const userId = context.get('userId');
     await team().join(context.req.valid('param').code, userId, context.req.valid('json').displayName ?? null);
     const member = (await team().memberOf(userId))!;
-    return context.json({ team: { id: member.teamId, name: member.teamName }, ...memberView(member) }, 200);
+    return context.json({ team: { id: member.teamId, name: member.teamName }, ...(await view(member)) }, 200);
   });
 
   app.openapi(route('Studio team', {

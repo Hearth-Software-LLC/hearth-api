@@ -21,6 +21,8 @@ export type Member = {
   canPlans: boolean;
   canAccounts: boolean;
   displayName: string | null;
+  /** The profile photo's path in the library bucket. */
+  avatarPath: string | null;
   notifyDue: boolean;
   notifyComments: boolean;
   notifyFailed: boolean;
@@ -40,6 +42,7 @@ function member(row: Record<string, unknown>): Member {
     teamId: String(row.team_id), teamName: String(row.team_name ?? ''), userId: String(row.user_id),
     role: row.role as Member['role'], canPost: row.can_post === true, canPlans: row.can_plans === true, canAccounts: row.can_accounts === true,
     displayName: (row.display_name as string | null) ?? null,
+    avatarPath: (row.avatar_path as string | null) ?? null,
     notifyDue: row.notify_due !== false, notifyComments: row.notify_comments !== false, notifyFailed: row.notify_failed !== false,
     addedAt: iso(row.added_at),
   };
@@ -82,6 +85,17 @@ export function createTeamService(sql: Sql, options: { ownerIds: string[]; now?:
     async members(teamId: string): Promise<Member[]> {
       const rows = await sql`${select} where m.team_id = ${teamId} order by m.role desc, m.added_at`;
       return rows.map(member);
+    },
+
+    /** Sets (or clears) a member's profile photo; returns the path it replaced. */
+    async setAvatar(teamId: string, userId: string, path: string | null) {
+      const [row] = await sql`
+        update studio_members m set avatar_path = ${path}
+        from (select avatar_path as previous from studio_members where team_id = ${teamId} and user_id = ${userId}) old
+        where m.team_id = ${teamId} and m.user_id = ${userId}
+        returning old.previous`;
+      if (!row) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Member not found');
+      return (row.previous as string | null) ?? null;
     },
 
     async team(teamId: string) {
