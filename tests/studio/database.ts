@@ -9,9 +9,12 @@ export const STUDIO_MIGRATIONS = [
   '20261029100100_studio_library.sql',
   '20261029120000_library_one_version.sql',
   '20261029180000_studio_member_avatars.sql',
+  '20261029200000_affiliates_and_links.sql',
 ];
 
 export const STUDIO_TABLES = [
+  'asc_report_requests', 'campaign_stats_daily', 'link_taps_daily', 'campaign_links', 'affiliate_flags', 'affiliate_credits',
+  'affiliate_payouts', 'affiliate_attributions', 'affiliate_invites', 'affiliate_codes', 'affiliates',
   'library_assets', 'library_runs', 'marketing_campaigns', 'store_designs',
   'social_metrics', 'social_comments', 'social_targets', 'social_posts', 'social_connections',
   'studio_devices', 'plan_grants_log', 'studio_invites', 'studio_members', 'studio_teams',

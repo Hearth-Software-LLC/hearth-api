@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { hkdfSync, randomUUID } from 'node:crypto';
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
 import { secureHeaders } from 'hono/secure-headers';
 import { HTTPException } from 'hono/http-exception';
@@ -68,6 +68,13 @@ import type { SocialStore } from './social/store.js';
 import { createMetaClient } from './social/meta.js';
 import type { MetaClient } from './social/meta.js';
 import { registerStudio } from './studio/routes.js';
+import { registerAffiliates } from './affiliates/routes.js';
+import { createAffiliateService } from './affiliates/service.js';
+import type { AffiliateService } from './affiliates/service.js';
+import { createLinkService } from './affiliates/links.js';
+import type { LinkService } from './affiliates/links.js';
+import { createAscClient, importCampaignStats } from './affiliates/asc.js';
+import { setAffiliateCredit } from './affiliates/hook.js';
 import { createTeamService } from './studio/team.js';
 import type { TeamService } from './studio/team.js';
 import { createLibraryService } from './studio/library.js';
@@ -123,6 +130,8 @@ export type AppOptions = {
     team?: TeamService; library?: LibraryService; storage?: StudioStorage; documents?: DocumentsService;
     plans?: PlansBackend; apps?: GitHubApps; notifier?: StudioNotifier; sql?: Sql;
   };
+  /** Affiliates and campaign links. Built from DATABASE_URL, SOCIAL_TOKEN_KEY and ASC_* when not given. */
+  affiliates?: { service?: AffiliateService; links?: LinkService; importStats?: (team: string) => Promise<unknown> };
 };
 
 type RequestLog = {
@@ -392,9 +401,44 @@ export function createApp(options: AppOptions = {}) {
     sql: () => options.studio?.sql ?? database,
   });
 
+  // Affiliates: credit keyed on an HMAC of store transaction ids, with a key derived from SOCIAL_TOKEN_KEY.
+  const affiliateService = options.affiliates?.service ?? (database && config.SOCIAL_TOKEN_KEY
+    ? createAffiliateService(database, {
+      secret: Buffer.from(hkdfSync('sha256', Buffer.from(config.SOCIAL_TOKEN_KEY, 'base64'), Buffer.alloc(0), 'hearth-affiliate-transactions', 32)),
+      acceptSandbox: config.AFFILIATES_ACCEPT_SANDBOX,
+    })
+    : undefined);
+  setAffiliateCredit(affiliateService);
+  const linkService = options.affiliates?.links ?? (database
+    ? createLinkService(database, { providerId: config.ASC_PROVIDER_ID, shortBase: config.SHORT_LINK_BASE })
+    : undefined);
+  const importStats = options.affiliates?.importStats ?? (database && linkService && config.ASC_KEY_ID && config.ASC_ISSUER_ID && config.ASC_PRIVATE_KEY
+    ? ((client) => (team: string) => importCampaignStats(database, client, linkService, team))(
+      createAscClient({ keyId: config.ASC_KEY_ID, issuerId: config.ASC_ISSUER_ID, privateKey: config.ASC_PRIVATE_KEY }, options.fetcher ?? fetch))
+    : undefined);
+  registerAffiliates(app, {
+    affiliates: () => affiliateService,
+    links: () => linkService,
+    events: () => (database
+      ? async (start: Date, end: Date) => (await database`
+          select payload from revenuecat_webhook_events where processed_at >= ${start} and processed_at < ${end} order by processed_at`)
+        .map((row) => row.payload as unknown)
+      : undefined),
+    importStats: () => importStats,
+  });
+  // App Store Connect's campaign numbers, daily (they arrive a day or two late).
+  app.get('/internal/affiliates/cron', async (context) => {
+    requireCronSecret(config, context.req.header('Authorization'));
+    if (!database || !importStats) return context.json({ skipped: 'App Store Connect is not configured' }, 200);
+    const teams = await database`select distinct team_id from campaign_links where deleted_at is null`;
+    const results = [];
+    for (const row of teams) results.push({ team: String(row.team_id), apps: await importStats(String(row.team_id)) });
+    return context.json({ teams: results }, 200);
+  });
+
   // DELETE /v1/me and DELETE /v1/bigtable/me share one deletion, which needs these.
   setAccountDeletionDependencies({
-    plaidClient: plaidDataClient, connections: connectionStore, seal: tokenSeal, hearken, budgetGroups, reports,
+    plaidClient: plaidDataClient, connections: connectionStore, seal: tokenSeal, hearken, budgetGroups, reports, affiliates: affiliateService,
   });
   registerAccount(app);
 

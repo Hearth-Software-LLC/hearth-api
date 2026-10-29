@@ -54,7 +54,7 @@ const ok = { ok: true as const };
 
 const memberView = (member: Member) => ({
   userId: member.userId, role: member.role, displayName: member.displayName,
-  permissions: { post: member.role === 'owner' || member.canPost, plans: member.role === 'owner' || member.canPlans, accounts: member.role === 'owner' || member.canAccounts },
+  permissions: { post: member.role === 'owner' || member.canPost, plans: member.role === 'owner' || member.canPlans, accounts: member.role === 'owner' || member.canAccounts, affiliates: member.role === 'owner' || member.canAffiliates },
   notifications: { due: member.notifyDue, comments: member.notifyComments, failed: member.notifyFailed },
   addedAt: member.addedAt,
 });
@@ -148,13 +148,13 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     method: 'patch', path: '/v1/studio/members/{userId}', summary: 'What a member can do (owners only)',
     request: {
       params: z.object({ userId: uuid.openapi({ param: { name: 'userId', in: 'path' } }) }),
-      ...body(z.object({ post: z.boolean().optional(), plans: z.boolean().optional(), accounts: z.boolean().optional() }).strict()),
+      ...body(z.object({ post: z.boolean().optional(), plans: z.boolean().optional(), accounts: z.boolean().optional(), affiliates: z.boolean().optional() }).strict()),
     },
     responses: { 200: anyJson('Member'), ...errors },
   }), async (context) => {
     const owner = need(context, 'owner');
     const input = context.req.valid('json');
-    const updated = await team().updateMember(owner.teamId, context.req.valid('param').userId, defined({ canPost: input.post, canPlans: input.plans, canAccounts: input.accounts }));
+    const updated = await team().updateMember(owner.teamId, context.req.valid('param').userId, defined({ canPost: input.post, canPlans: input.plans, canAccounts: input.accounts, canAffiliates: input.affiliates }));
     return context.json(await view(updated), 200);
   });
 
@@ -170,12 +170,12 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
 
   app.openapi(route('Studio team', {
     method: 'post', path: '/v1/studio/invites', summary: 'An invite code for someone to join the team (owners only; a week, one use)',
-    request: body(z.object({ post: z.boolean().default(true), plans: z.boolean().default(false), accounts: z.boolean().default(false) }).strict()),
+    request: body(z.object({ post: z.boolean().default(true), plans: z.boolean().default(false), accounts: z.boolean().default(false), affiliates: z.boolean().default(false) }).strict()),
     responses: { 200: anyJson('Invite'), ...errors },
   }), async (context) => {
     const owner = need(context, 'owner');
     const input = context.req.valid('json');
-    return context.json(await team().createInvite(owner.teamId, owner.userId, { canPost: input.post, canPlans: input.plans, canAccounts: input.accounts }), 200);
+    return context.json(await team().createInvite(owner.teamId, owner.userId, { canPost: input.post, canPlans: input.plans, canAccounts: input.accounts, canAffiliates: input.affiliates }), 200);
   });
 
   app.openapi(route('Studio team', {

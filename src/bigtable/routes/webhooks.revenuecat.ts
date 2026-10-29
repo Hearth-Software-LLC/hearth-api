@@ -7,6 +7,7 @@ import { fetchRevenueCatEntitlements } from "../../services/revenuecat-entitleme
 import { ensureProfileForAccount } from "../../services/profiles.js";
 import { supabaseAdmin } from "../../services/supabase.js";
 import { serverError } from "../lib/server-error.js";
+import { creditAffiliateEvent } from "../../affiliates/hook.js";
 
 export async function POST(request: NextRequest) {
   const webhookSecret = process.env.REVENUECAT_WEBHOOK_SECRET;
@@ -57,6 +58,13 @@ export async function POST(request: NextRequest) {
 
   if (existingEvent.data) {
     return NextResponse.json({ ok: true, duplicate: true }, { status: 200 });
+  }
+
+  // Affiliate credit doesn't depend on a Hearth profile: any purchase with an affiliate's code counts.
+  try {
+    await creditAffiliateEvent(parsedBody);
+  } catch (error) {
+    return serverError("POST /api/webhooks/revenuecat affiliate credit failed", "Failed to process webhook", error);
   }
 
   let profileLookup = await supabaseAdmin

@@ -1,0 +1,2252 @@
+diff --git a/src/affiliates/asc.ts b/src/affiliates/asc.ts
+new file mode 100644
+index 0000000..b62d150
+--- /dev/null
++++ b/src/affiliates/asc.ts
+@@ -0,0 +1,167 @@
++import { gunzipSync } from 'node:zlib';
++import { importPKCS8, SignJWT } from 'jose';
++import type { Sql } from 'postgres';
++import type { LinkService, StatMetric } from './links.js';
++
++/**
++ * App Store Connect's Analytics Reports API: campaign page views, downloads and proceeds by ct=
++ * token, imported daily into campaign_stats_daily.
++ *
++ * Once per app, an ONGOING report request is made (it needs a key with the Admin role); Apple
++ * then makes daily report instances, each split into gzipped tab-separated segments. Apple's
++ * figures are totals for the token, never people, and below a privacy threshold they're left out.
++ * Column names vary a little between reports, so rows are read by header.
++ */
++
++export type AscCredentials = { keyId: string; issuerId: string; privateKey: string };
++export type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
++
++const API = 'https://api.appstoreconnect.apple.com';
++
++/** The detailed reports that carry the Campaign column. */
++export const CAMPAIGN_REPORTS = [
++  'App Store Discovery and Engagement Detailed',
++  'App Downloads Detailed',
++  'App Store Purchases Detailed',
++] as const;
++
++export function createAscClient(credentials: AscCredentials, fetcher: Fetch = fetch) {
++  let token: { value: string; expires: number } | undefined;
++
++  async function bearer() {
++    if (token && token.expires > Date.now() + 60_000) return token.value;
++    const key = await importPKCS8(credentials.privateKey.replace(/\\n/g, '\n'), 'ES256');
++    const expires = Date.now() + 15 * 60_000;
++    const value = await new SignJWT({})
++      .setProtectedHeader({ alg: 'ES256', kid: credentials.keyId, typ: 'JWT' })
++      .setIssuer(credentials.issuerId).setIssuedAt().setExpirationTime(Math.floor(expires / 1000)).setAudience('appstoreconnect-v1')
++      .sign(key);
++    token = { value, expires };
++    return value;
++  }
++
++  async function call<T = { data: unknown }>(path: string, init: RequestInit = {}): Promise<T> {
++    const response = await fetcher(path.startsWith('http') ? path : `${API}${path}`, {
++      ...init, headers: { authorization: `Bearer ${await bearer()}`, 'content-type': 'application/json', ...(init.headers ?? {}) },
++    });
++    if (!response.ok) throw new Error(`App Store Connect ${init.method ?? 'GET'} ${path.split('?')[0]} answered ${response.status}`);
++    return (await response.json()) as T;
++  }
++
++  type Item = { id: string; attributes?: Record<string, unknown> };
++  type Page = { data: Item[]; links?: { next?: string } };
++  async function all(path: string) {
++    const items: Item[] = [];
++    let next: string | undefined = path;
++    while (next) {
++      const page: Page = await call<Page>(next);
++      items.push(...page.data);
++      next = page.links?.next;
++    }
++    return items;
++  }
++
++  return {
++    async requestReports(appStoreId: string) {
++      const created = await call<{ data: { id: string } }>('/v1/analyticsReportRequests', {
++        method: 'POST',
++        body: JSON.stringify({ data: { type: 'analyticsReportRequests', attributes: { accessType: 'ONGOING' },
++          relationships: { app: { data: { type: 'apps', id: appStoreId } } } } }),
++      });
++      return created.data.id;
++    },
++    reports: (requestId: string) => all(`/v1/analyticsReportRequests/${requestId}/reports?limit=200`),
++    instances: (reportId: string) => all(`/v1/analyticsReports/${reportId}/instances?filter[granularity]=DAILY&limit=200`),
++    segments: (instanceId: string) => all(`/v1/analyticsReportInstances/${instanceId}/segments`),
++    async download(url: string) {
++      // Segment URLs are pre-signed: no token.
++      const response = await fetcher(url);
++      if (!response.ok) throw new Error(`An App Store Connect report segment answered ${response.status}`);
++      const bytes = Buffer.from(await response.arrayBuffer());
++      return (bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes) : bytes).toString('utf8');
++    },
++  };
++}
++
++export type AscClient = ReturnType<typeof createAscClient>;
++
++/** A report's rows as campaign totals (by token, day and metric), summed. */
++export function parseCampaignReport(tsv: string) {
++  const lines = tsv.split(/\r?\n/).filter((line) => line.trim());
++  if (lines.length < 2) return [];
++  const header = lines[0]!.split('\t').map((name) => name.trim().toLowerCase());
++  const column = (...names: string[]) => header.findIndex((name) => names.includes(name));
++  const date = column('date'), campaign = column('campaign'), counts = column('counts', 'count');
++  const event = column('event'), downloadType = column('download type');
++  const proceeds = column('proceeds in usd'), payingUsers = column('paying users', 'unique devices');
++  if (date < 0 || campaign < 0) return [];
++  const sums = new Map<string, { ct: string; day: string; metric: StatMetric; value: number }>();
++  const add = (ct: string, day: string, metric: StatMetric, value: number) => {
++    if (!Number.isFinite(value) || value === 0) return;
++    const key = `${ct}\u0000${day}\u0000${metric}`;
++    const entry = sums.get(key);
++    if (entry) entry.value += value; else sums.set(key, { ct, day, metric, value });
++  };
++  for (const line of lines.slice(1)) {
++    const cells = line.split('\t');
++    const ct = cells[campaign]?.trim() ?? '';
++    const day = cells[date]?.trim().slice(0, 10) ?? '';
++    if (!/^[A-Za-z0-9._-]{1,40}$/.test(ct) || !/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
++    const count = counts >= 0 ? Number(cells[counts]) : NaN;
++    if (event >= 0) {
++      const name = (cells[event] ?? '').toLowerCase();
++      if (name.includes('page view')) add(ct, day, 'page_views', count);
++    }
++    if (downloadType >= 0) {
++      const type = (cells[downloadType] ?? '').toLowerCase();
++      if (type.includes('redownload')) add(ct, day, 'redownloads', count);
++      else if (type.includes('download')) add(ct, day, 'downloads', count);
++    }
++    if (proceeds >= 0) add(ct, day, 'proceeds_cents', Math.round(Number(cells[proceeds]) * 100));
++    if (payingUsers >= 0 && proceeds >= 0) add(ct, day, 'paying_users', Number(cells[payingUsers]));
++  }
++  return [...sums.values()];
++}
++
++/**
++ * The daily import: makes each app's report request the first time, then reads every report
++ * instance newer than the last import. Report instances are complete days, so re-reading one
++ * just writes the same totals.
++ */
++export async function importCampaignStats(sql: Sql, client: AscClient, links: LinkService, team: string) {
++  const summary: { app: string; days: number; error?: string }[] = [];
++  for (const { app, appStoreId } of await links.storeApps(team)) {
++    try {
++      let [request] = await sql`select * from asc_report_requests where app_store_id = ${appStoreId}`;
++      if (!request) {
++        const id = await client.requestReports(appStoreId);
++        [request] = await sql`
++          insert into asc_report_requests (app_store_id, request_id) values (${appStoreId}, ${id})
++          on conflict (app_store_id) do update set request_id = excluded.request_id returning *`;
++      }
++      const after = request!.imported_through instanceof Date ? request!.imported_through.toISOString().slice(0, 10) : null;
++      let latest = after;
++      const days = new Set<string>();
++      for (const report of await client.reports(String(request!.request_id))) {
++        if (!(CAMPAIGN_REPORTS as readonly string[]).includes(String(report.attributes?.name ?? ''))) continue;
++        for (const instance of await client.instances(report.id)) {
++          const processed = String(instance.attributes?.processingDate ?? '');
++          if (after && processed <= after) continue;
++          for (const segment of await client.segments(instance.id)) {
++            const url = segment.attributes?.url;
++            if (typeof url !== 'string') continue;
++            const rows = parseCampaignReport(await client.download(url));
++            await links.recordStats(team, app, rows);
++            for (const row of rows) days.add(row.day);
++          }
++          if (!latest || processed > latest) latest = processed;
++        }
++      }
++      if (latest && latest !== after) await sql`update asc_report_requests set imported_through = ${latest} where app_store_id = ${appStoreId}`;
++      summary.push({ app, days: days.size });
++    } catch (error) {
++      summary.push({ app, days: 0, error: error instanceof Error ? error.message : 'failed' });
++    }
++  }
++  return summary;
++}
+diff --git a/src/affiliates/credit.ts b/src/affiliates/credit.ts
+new file mode 100644
+index 0000000..2c146d9
+--- /dev/null
++++ b/src/affiliates/credit.ts
+@@ -0,0 +1,123 @@
++import { createHmac } from 'node:crypto';
++
++/**
++ * Reading a RevenueCat webhook event for affiliate credit, and the money math. Pure: the
++ * database side is service.ts.
++ *
++ * Field names follow RevenueCat's webhook event (https://www.revenuecat.com/docs/integrations/webhooks/event-types-and-fields):
++ * `price` is in US dollars (negative on a refund), `takehome_percentage` is the share left after
++ * the store's commission and taxes, `offer_code` is the App Store offer code used, and
++ * `subscriber_attributes` carries what the app saved to the customer (our `hearth_referral`).
++ */
++
++export type PurchaseEvent = {
++  id: string;
++  type: string;
++  environment: 'SANDBOX' | 'PRODUCTION';
++  store: string;
++  transactionId: string | null;
++  originalTransactionId: string | null;
++  productId: string;
++  priceUsd: number;
++  takehome: number;
++  offerCode: string | null;
++  referralCode: string | null;
++  cancelReason: string | null;
++  occurredAt: Date;
++};
++
++/** Events that are a paid (or free-trial) purchase or renewal. */
++export const PURCHASE_TYPES = new Set(['INITIAL_PURCHASE', 'RENEWAL', 'PRODUCT_CHANGE', 'NON_RENEWING_PURCHASE']);
++export const REFERRAL_ATTRIBUTE = 'hearth_referral';
++
++const text = (value: unknown) => (typeof value === 'string' && value.trim() ? value.trim() : null);
++const number = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
++
++/** The event's purchase fields, or null when it isn't one affiliates care about. */
++export function readPurchaseEvent(body: unknown): PurchaseEvent | null {
++  if (!body || typeof body !== 'object') return null;
++  const outer = body as Record<string, unknown>;
++  const event = (outer.event && typeof outer.event === 'object' ? outer.event : outer) as Record<string, unknown>;
++  const id = text(event.id) ?? text(event.event_id);
++  const type = text(event.type)?.toUpperCase();
++  if (!id || !type) return null;
++  const refund = isRefund(type, text(event.cancel_reason));
++  if (!PURCHASE_TYPES.has(type) && !refund) return null;
++  const attributes = (event.subscriber_attributes && typeof event.subscriber_attributes === 'object'
++    ? event.subscriber_attributes : {}) as Record<string, unknown>;
++  const referral = attributes[REFERRAL_ATTRIBUTE] as { value?: unknown } | undefined;
++  const at = number(event.purchased_at_ms) ?? number(event.event_timestamp_ms) ?? Date.now();
++  const takehome = number(event.takehome_percentage);
++  return {
++    id,
++    type,
++    environment: text(event.environment)?.toUpperCase() === 'SANDBOX' ? 'SANDBOX' : 'PRODUCTION',
++    store: (text(event.store) ?? 'APP_STORE').toUpperCase(),
++    transactionId: text(event.transaction_id),
++    originalTransactionId: text(event.original_transaction_id),
++    productId: text(event.product_id) ?? 'unknown',
++    priceUsd: number(event.price) ?? 0,
++    // The App Store keeps 15–30%; without a figure, assume the standard 70% for safety.
++    takehome: takehome !== null && takehome >= 0 && takehome <= 1 ? takehome : 0.7,
++    offerCode: text(event.offer_code),
++    referralCode: referral && typeof referral === 'object' ? text(referral.value) : null,
++    cancelReason: text(event.cancel_reason)?.toUpperCase() ?? null,
++    // A purchase counts when it was bought; a refund when it happened.
++    occurredAt: new Date(refund ? number(event.event_timestamp_ms) ?? at : at),
++  };
++}
++
++/** A refund reaches the webhook as a cancellation for customer support. */
++export function isRefund(type: string, cancelReason: string | null) {
++  return type === 'CANCELLATION' && (cancelReason ?? '').toUpperCase() === 'CUSTOMER_SUPPORT';
++}
++
++/** What the team receives for a purchase, in US cents (never negative here; refunds copy the credit). */
++export function proceedsCents(priceUsd: number, takehome: number) {
++  if (!(priceUsd > 0)) return 0;
++  return Math.round(priceUsd * takehome * 100);
++}
++
++export type Terms = { rateBps: number | null; flatCents: number | null };
++
++/**
++ * The affiliate's share of one purchase, in cents. A rate is a share of proceeds, rounded half
++ * up to the cent; a flat amount is paid once per subscription (on its first paid purchase).
++ */
++export function commissionCents(proceeds: number, terms: Terms, flatAlreadyPaid: boolean) {
++  if (proceeds <= 0) return 0;
++  if (terms.rateBps !== null) return Math.floor((proceeds * terms.rateBps + 5000) / 10000);
++  if (terms.flatCents !== null) return flatAlreadyPaid ? 0 : terms.flatCents;
++  return 0;
++}
++
++/** The code a subscriber used, kept the way codes are stored (upper case). */
++export function normalizeCode(code: string | null) {
++  if (!code) return null;
++  const upper = code.trim().toUpperCase();
++  return /^[A-Z0-9_-]{3,40}$/.test(upper) ? upper : null;
++}
++
++/** A keyed hash of a store transaction id: enough to match renewals and refunds, never to find a person. */
++export function transactionKey(secret: Buffer, store: string, id: string) {
++  return createHmac('sha256', secret).update(`affiliate-transaction:${store}:${id}`).digest('hex');
++}
++
++/** Adds whole months in UTC (the 31st into a short month lands on its last day). */
++export function addMonths(date: Date, months: number) {
++  const result = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1,
++    date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds(), date.getUTCMilliseconds()));
++  const lastDay = new Date(Date.UTC(result.getUTCFullYear(), result.getUTCMonth() + 1, 0)).getUTCDate();
++  result.setUTCDate(Math.min(date.getUTCDate(), lastDay));
++  return result;
++}
++
++/** "2026-10" → the month's first instant and the next month's (UTC). */
++export function monthRange(month: string) {
++  const match = /^(\d{4})-(\d{2})$/.exec(month);
++  if (!match) throw new Error('A month looks like 2026-10');
++  const start = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1));
++  return { start, end: addMonths(start, 1) };
++}
++
++export const formatCents = (cents: number) => `${cents < 0 ? '-' : ''}$${(Math.abs(cents) / 100).toFixed(2)}`;
+diff --git a/src/affiliates/hook.ts b/src/affiliates/hook.ts
+new file mode 100644
+index 0000000..a97be8f
+--- /dev/null
++++ b/src/affiliates/hook.ts
+@@ -0,0 +1,18 @@
++import type { AffiliateService } from './service.js';
++
++/**
++ * The RevenueCat webhook (a plain BigTable handler without the app's dependencies) credits
++ * affiliates through here; createApp sets it. Crediting is idempotent per event, so a webhook
++ * that fails after this and is retried credits nothing twice.
++ */
++let service: AffiliateService | undefined;
++
++export function setAffiliateCredit(next: AffiliateService | undefined) {
++  service = next;
++}
++
++/** Credits the event when it carries an affiliate's code. Throws so RevenueCat retries a failure. */
++export async function creditAffiliateEvent(body: unknown) {
++  if (!service) return undefined;
++  return service.creditEvent(body);
++}
+diff --git a/src/affiliates/links.ts b/src/affiliates/links.ts
+new file mode 100644
+index 0000000..ebb7eb4
+--- /dev/null
++++ b/src/affiliates/links.ts
+@@ -0,0 +1,214 @@
++import type { Sql } from 'postgres';
++import { ApiError } from '../errors.js';
++import { isUniqueViolation } from '../hearken/service.js';
++
++/**
++ * Campaign links: an App Store link with a ct= token, maybe behind a short link. For reporting
++ * only (App Store Connect's totals for the token, and short-link taps); they never create money owed.
++ */
++
++export const STAT_METRICS = ['page_views', 'downloads', 'redownloads', 'proceeds_cents', 'paying_users'] as const;
++export type StatMetric = (typeof STAT_METRICS)[number];
++export type Totals = Record<StatMetric, number> & { taps: number };
++
++export type LinkView = {
++  id: string; app: string; name: string; ct: string; appStoreId: string; slug: string | null;
++  affiliateId: string | null; affiliateName: string | null;
++  /** The App Store link itself, and the short form when there is one. */
++  url: string; shortUrl: string | null;
++  totals: Totals;
++  createdAt: string;
++};
++
++const zero = (): Totals => ({ taps: 0, page_views: 0, downloads: 0, redownloads: 0, proceeds_cents: 0, paying_users: 0 });
++const iso = (value: unknown) => (value instanceof Date ? value.toISOString() : String(value));
++
++/** Crawlers and link previews: they don't count as taps. */
++const BOT = /bot|crawl|spider|preview|facebookexternalhit|slackbot|discord|whatsapp|telegram|twitter|linkedin|embedly|curl|wget|python|go-http/i;
++export const isBot = (userAgent: string | undefined) => !userAgent || BOT.test(userAgent);
++
++export function appStoreUrl(appStoreId: string, ct: string, providerId: string | undefined) {
++  const query = new URLSearchParams();
++  if (providerId) query.set('pt', providerId);
++  query.set('ct', ct);
++  query.set('mt', '8');
++  return `https://apps.apple.com/app/id${appStoreId}?${query.toString()}`;
++}
++
++export function slugify(value: string) {
++  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
++}
++
++export type LinkService = ReturnType<typeof createLinkService>;
++
++export function createLinkService(sql: Sql, options: { providerId?: string | undefined; shortBase: string; now?: () => number }) {
++  const now = options.now ?? Date.now;
++  const base = options.shortBase.replace(/\/+$/, '');
++
++  async function views(team: string, filter: { id?: string; app?: string; affiliateId?: string; days: number }): Promise<LinkView[]> {
++    const since = new Date(now() - filter.days * 86_400_000).toISOString().slice(0, 10);
++    const rows = await sql`
++      select l.*, a.name as affiliate_name,
++        coalesce((select sum(t.taps) from link_taps_daily t where t.link_id = l.id and t.day >= ${since}), 0) as taps,
++        coalesce((select jsonb_object_agg(s.metric, s.total) from (
++          select metric, sum(value) as total from campaign_stats_daily c
++          where c.team_id = l.team_id and c.app = l.app and c.ct = l.ct and c.day >= ${since} group by metric) s), '{}') as stats
++      from campaign_links l left join affiliates a on a.id = l.affiliate_id
++      where l.team_id = ${team} and l.deleted_at is null
++        and (${filter.id ?? null}::uuid is null or l.id = ${filter.id ?? null})
++        and (${filter.app ?? null}::text is null or l.app = ${filter.app ?? null})
++        and (${filter.affiliateId ?? null}::uuid is null or l.affiliate_id = ${filter.affiliateId ?? null})
++      order by l.created_at desc`;
++    return rows.map((row) => {
++      const totals = zero();
++      totals.taps = Number(row.taps);
++      for (const [metric, value] of Object.entries((row.stats as Record<string, unknown>) ?? {})) {
++        if ((STAT_METRICS as readonly string[]).includes(metric)) totals[metric as StatMetric] = Number(value);
++      }
++      return {
++        id: String(row.id), app: String(row.app), name: String(row.name), ct: String(row.ct), appStoreId: String(row.app_store_id),
++        slug: (row.slug as string | null) ?? null, affiliateId: (row.affiliate_id as string | null) ?? null,
++        affiliateName: (row.affiliate_name as string | null) ?? null,
++        url: appStoreUrl(String(row.app_store_id), String(row.ct), options.providerId),
++        shortUrl: row.slug ? `${base}/${String(row.slug)}` : null,
++        totals, createdAt: iso(row.created_at),
++      };
++    });
++  }
++
++  async function one(team: string, id: string, days = 30) {
++    const [found] = await views(team, { id, days });
++    if (!found) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Link not found');
++    return found;
++  }
++
++  return {
++    list: (team: string, filter: { app?: string; affiliateId?: string; days?: number } = {}) => {
++      const query: { app?: string; affiliateId?: string; days: number } = { days: filter.days ?? 30 };
++      if (filter.app) query.app = filter.app;
++      if (filter.affiliateId) query.affiliateId = filter.affiliateId;
++      return views(team, query);
++    },
++    get: one,
++
++    async create(team: string, by: string, input: {
++      app: string; name: string; appStoreId: string; ct?: string | undefined; slug?: string | null | undefined; affiliateId?: string | null | undefined;
++    }) {
++      const ct = (input.ct ?? slugify(input.name).slice(0, 40)) || 'link';
++      if (!/^[A-Za-z0-9._-]{1,40}$/.test(ct)) throw new ApiError(400, 'INVALID_REQUEST', 'A campaign token is up to 40 letters, digits, . _ or -');
++      const slug = input.slug === undefined ? `${input.app}-${slugify(input.name)}`.slice(0, 60) : input.slug;
++      if (slug !== null && !/^[a-z0-9-]{2,60}$/.test(slug)) throw new ApiError(400, 'INVALID_REQUEST', 'A short link is 2–60 lowercase letters, digits or -');
++      if (input.affiliateId) {
++        const [affiliate] = await sql`select 1 from affiliates where id = ${input.affiliateId} and team_id = ${team}`;
++        if (!affiliate) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Affiliate not found');
++      }
++      try {
++        const [row] = await sql`
++          insert into campaign_links (team_id, app, name, ct, app_store_id, slug, affiliate_id, created_by)
++          values (${team}, ${input.app}, ${input.name}, ${ct}, ${input.appStoreId}, ${slug}, ${input.affiliateId ?? null}, ${by})
++          returning id`;
++        return one(team, String(row!.id));
++      } catch (error) {
++        if (isUniqueViolation(error)) throw new ApiError(409, 'LINK_TAKEN', 'That campaign token or short link is already used');
++        throw error;
++      }
++    },
++
++    async update(team: string, id: string, patch: { name?: string | undefined; affiliateId?: string | null | undefined; slug?: string | null | undefined }) {
++      const current = await one(team, id);
++      if (patch.slug !== undefined && patch.slug !== null && !/^[a-z0-9-]{2,60}$/.test(patch.slug)) {
++        throw new ApiError(400, 'INVALID_REQUEST', 'A short link is 2–60 lowercase letters, digits or -');
++      }
++      try {
++        await sql`
++          update campaign_links set
++            name = ${patch.name ?? current.name},
++            affiliate_id = ${patch.affiliateId !== undefined ? patch.affiliateId : current.affiliateId},
++            slug = ${patch.slug !== undefined ? patch.slug : current.slug}
++          where id = ${id} and team_id = ${team}`;
++      } catch (error) {
++        if (isUniqueViolation(error)) throw new ApiError(409, 'LINK_TAKEN', 'That short link is already used');
++        throw error;
++      }
++      return one(team, id);
++    },
++
++    /** Stops the short link working; App Store Connect keeps reporting the token. */
++    async remove(team: string, id: string) {
++      const [row] = await sql`
++        update campaign_links set deleted_at = now(), slug = null where id = ${id} and team_id = ${team} and deleted_at is null returning id`;
++      if (!row) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Link not found');
++    },
++
++    /** A link's numbers day by day. */
++    async daily(team: string, id: string, days = 30) {
++      const link = await one(team, id, days);
++      const since = new Date(now() - days * 86_400_000).toISOString().slice(0, 10);
++      const taps = await sql`select day, taps from link_taps_daily where link_id = ${id} and day >= ${since}`;
++      const stats = await sql`
++        select day, metric, value from campaign_stats_daily where team_id = ${team} and app = ${link.app} and ct = ${link.ct} and day >= ${since}`;
++      const byDay = new Map<string, Totals>();
++      const at = (value: unknown) => {
++        const key = value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
++        if (!byDay.has(key)) byDay.set(key, zero());
++        return byDay.get(key)!;
++      };
++      for (const row of taps) at(row.day).taps = Number(row.taps);
++      for (const row of stats) at(row.day)[row.metric as StatMetric] = Number(row.value);
++      return { link, days: [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, totals]) => ({ date, ...totals })) };
++    },
++
++    /** An app's campaign totals by token (App Store Connect › Analytics, in Hearth Studio). */
++    async appStore(team: string, app: string, days = 30) {
++      const since = new Date(now() - days * 86_400_000).toISOString().slice(0, 10);
++      const rows = await sql`
++        select s.ct, s.metric, sum(s.value) as total, max(s.day) as latest,
++          (select l.name from campaign_links l where l.team_id = s.team_id and l.app = s.app and l.ct = s.ct and l.deleted_at is null limit 1) as name
++        from campaign_stats_daily s
++        where s.team_id = ${team} and s.app = ${app} and s.day >= ${since}
++        group by s.team_id, s.app, s.ct, s.metric`;
++      const campaigns = new Map<string, { ct: string; name: string | null; totals: Totals }>();
++      let latest: string | null = null;
++      for (const row of rows) {
++        const ct = String(row.ct);
++        if (!campaigns.has(ct)) campaigns.set(ct, { ct, name: (row.name as string | null) ?? null, totals: zero() });
++        campaigns.get(ct)!.totals[row.metric as StatMetric] = Number(row.total);
++        const day = row.latest instanceof Date ? row.latest.toISOString().slice(0, 10) : String(row.latest);
++        if (!latest || day > latest) latest = day;
++      }
++      const list = [...campaigns.values()].sort((a, b) => b.totals.downloads - a.totals.downloads);
++      const total = zero();
++      for (const entry of list) for (const metric of STAT_METRICS) total[metric] += entry.totals[metric];
++      return { app, days, updatedThrough: latest, totals: total, campaigns: list };
++    },
++
++    /** GET /go/<slug>: where to send the tap, counting it unless it's a crawler. */
++    async follow(slug: string, userAgent: string | undefined) {
++      const [row] = await sql`select id, app_store_id, ct from campaign_links where slug = ${slug} and deleted_at is null`;
++      if (!row) return undefined;
++      if (!isBot(userAgent)) {
++        const day = new Date(now()).toISOString().slice(0, 10);
++        await sql`
++          insert into link_taps_daily (link_id, day, taps) values (${row.id}, ${day}, 1)
++          on conflict (link_id, day) do update set taps = link_taps_daily.taps + 1`;
++      }
++      return appStoreUrl(String(row.app_store_id), String(row.ct), options.providerId);
++    },
++
++    /** What App Store Connect imports into: an app's daily totals for a token. */
++    async recordStats(team: string, app: string, rows: { ct: string; day: string; metric: StatMetric; value: number }[]) {
++      for (const row of rows) {
++        await sql`
++          insert into campaign_stats_daily (team_id, app, ct, day, metric, value)
++          values (${team}, ${app}, ${row.ct}, ${row.day}, ${row.metric}, ${row.value})
++          on conflict (team_id, app, ct, day, metric) do update set value = excluded.value`;
++      }
++    },
++
++    /** The apps (key and App Store id) that have links, for the import. */
++    async storeApps(team: string) {
++      const rows = await sql`select distinct app, app_store_id from campaign_links where team_id = ${team}`;
++      return rows.map((row) => ({ app: String(row.app), appStoreId: String(row.app_store_id) }));
++    },
++  };
++}
+diff --git a/src/affiliates/routes.ts b/src/affiliates/routes.ts
+new file mode 100644
+index 0000000..06f8201
+--- /dev/null
++++ b/src/affiliates/routes.ts
+@@ -0,0 +1,374 @@
++import { createRoute, z } from '@hono/zod-openapi';
++import type { OpenAPIHono, RouteConfig } from '@hono/zod-openapi';
++import type { Context } from 'hono';
++import { errorSchema } from '../contracts/common.js';
++import type { ApiEnvironment } from '../contracts/common.js';
++import { ApiError } from '../errors.js';
++import { memberOf, need, teamOf } from '../studio/gate.js';
++import { can } from '../studio/team.js';
++import type { LinkService } from './links.js';
++import type { AffiliateService, AffiliateView } from './service.js';
++
++/**
++ * Affiliates, campaign links and App Store campaign numbers in Hearth Studio (/v1/studio/…, the
++ * team's), an affiliate's own view (/v1/affiliate/…, only theirs), and short links (/go/<slug>).
++ */
++
++export type AffiliateDependencies = {
++  affiliates: () => AffiliateService | undefined;
++  links: () => LinkService | undefined;
++  /** RevenueCat webhook payloads stored between two instants, for reconciling. */
++  events: () => ((start: Date, end: Date) => Promise<unknown[]>) | undefined;
++  /** Runs the App Store Connect import now (also the daily cron). */
++  importStats: () => ((team: string) => Promise<unknown>) | undefined;
++};
++
++const appKey = z.string().regex(/^[a-z0-9-]{1,40}$/);
++const uuid = z.uuid();
++const month = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/);
++const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
++const days = z.coerce.number().int().min(1).max(400).default(30);
++
++const failure = (description: string) => ({ description, content: { 'application/json': { schema: errorSchema } } });
++const errors = {
++  400: failure('Invalid request'), 401: failure('Invalid or missing token'), 403: failure('Not allowed'),
++  404: failure('Not found'), 409: failure('Conflicts with something'), 503: failure('Not configured'),
++} as const;
++const anyJson = (description: string) => ({ description, content: { 'application/json': { schema: z.any() } } });
++const csv = (description: string) => ({ description, content: { 'text/csv': { schema: z.string() } } });
++const body = <T extends z.ZodType>(schema: T) => ({ body: { required: true, content: { 'application/json': { schema } } } });
++const route = <R extends Omit<RouteConfig, 'tags' | 'security'>>(tag: string, config: R) =>
++  createRoute({ ...config, tags: [tag], security: [{ BearerAuth: [] }] } as R & { tags: string[] });
++const idParam = (_name: 'id') => z.object({ id: uuid.openapi({ param: { name: 'id', in: 'path' } }) });
++const ok = { ok: true as const };
++
++const terms = {
++  rateBps: z.number().int().min(0).max(10000).nullable().optional(),
++  flatCents: z.number().int().min(0).max(1_000_000).nullable().optional(),
++  windowMonths: z.number().int().min(1).max(120).optional(),
++};
++
++/** Without the affiliates permission, a member sees who and which apps, not money or contact details. */
++function forMember(context: Pick<Context<ApiEnvironment>, 'get'>, affiliate: AffiliateView) {
++  if (can(memberOf(context), 'affiliates')) return affiliate;
++  const { owedCents: _owed, monthCents: _month, contact: _contact, terms: _terms, ...rest } = affiliate;
++  return rest;
++}
++
++export function registerAffiliates(app: OpenAPIHono<ApiEnvironment>, dependencies: AffiliateDependencies) {
++  const required = <T>(get: () => T | undefined, what: string): T => {
++    const value = get();
++    if (!value) throw new ApiError(503, 'STORAGE_NOT_CONFIGURED', `${what} is not configured`);
++    return value;
++  };
++  const affiliates = () => required(dependencies.affiliates, 'Affiliates (DATABASE_URL, SOCIAL_TOKEN_KEY)');
++  const links = () => required(dependencies.links, 'Campaign links (DATABASE_URL)');
++
++  // MARK: Affiliates (the team's)
++
++  app.openapi(route('Studio affiliates', {
++    method: 'get', path: '/v1/studio/affiliates', summary: 'Every affiliate, with what is owed (amounts need the affiliates permission)',
++    responses: { 200: anyJson('Affiliates'), ...errors },
++  }), async (context) => {
++    const team = teamOf(context);
++    const list = await affiliates().list(team);
++    const money = can(memberOf(context), 'affiliates');
++    const flags = money ? (await affiliates().flags(team)).length : 0;
++    return context.json({
++      affiliates: list.map((entry) => forMember(context, entry)),
++      ...(money ? { owedCents: list.reduce((sum, entry) => sum + entry.owedCents, 0), openFlags: flags } : {}),
++    }, 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'post', path: '/v1/studio/affiliates', summary: 'Add an affiliate: a percentage of proceeds or a flat amount per subscriber',
++    request: body(z.object({ name: z.string().trim().min(1).max(80), contact: z.string().trim().max(200).nullable().optional(), ...terms }).strict()),
++    responses: { 200: anyJson('Affiliate'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    return context.json(await affiliates().create(member.teamId, context.req.valid('json')), 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'get', path: '/v1/studio/affiliates/{id}', summary: 'An affiliate with codes, links, recent credit and payouts',
++    request: { params: idParam('id'), query: z.object({ month: month.optional() }) },
++    responses: { 200: anyJson('Affiliate'), ...errors },
++  }), async (context) => {
++    const team = teamOf(context);
++    const { id } = context.req.valid('param');
++    const affiliate = await affiliates().get(team, id);
++    const codes = await affiliates().codes(team, id);
++    const theirLinks = dependencies.links() ? await links().list(team, { affiliateId: id }) : [];
++    if (!can(memberOf(context), 'affiliates')) return context.json({ affiliate: forMember(context, affiliate), codes, links: theirLinks }, 200);
++    const { month: wanted } = context.req.valid('query');
++    return context.json({
++      affiliate, codes, links: theirLinks,
++      credits: await affiliates().credits(team, id, wanted),
++      payouts: await affiliates().payouts(team, id),
++      flags: await affiliates().flags(team, id),
++    }, 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'patch', path: '/v1/studio/affiliates/{id}', summary: 'Change an affiliate (new terms apply to purchases from now on)',
++    request: {
++      params: idParam('id'),
++      ...body(z.object({ name: z.string().trim().min(1).max(80).optional(), contact: z.string().trim().max(200).nullable().optional(), active: z.boolean().optional(), ...terms }).strict()),
++    },
++    responses: { 200: anyJson('Affiliate'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    return context.json(await affiliates().update(member.teamId, context.req.valid('param').id, context.req.valid('json')), 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'post', path: '/v1/studio/affiliates/{id}/codes', summary: 'Give an affiliate a code (an App Store offer code, or a referral code the app asks for)',
++    request: {
++      params: idParam('id'),
++      ...body(z.object({
++        app: appKey, code: z.string().trim().min(3).max(40), kind: z.enum(['apple_offer', 'referral']),
++        offerRef: z.string().trim().min(1).max(100).nullable().optional(),
++      }).strict()),
++    },
++    responses: { 200: anyJson('Code'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    return context.json(await affiliates().addCode(member.teamId, context.req.valid('param').id, context.req.valid('json')), 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'patch', path: '/v1/studio/affiliate-codes/{id}', summary: 'Turn a code off or on',
++    request: { params: idParam('id'), ...body(z.object({ active: z.boolean().optional(), offerRef: z.string().trim().min(1).max(100).nullable().optional() }).strict()) },
++    responses: { 200: anyJson('Code'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    return context.json(await affiliates().updateCode(member.teamId, context.req.valid('param').id, context.req.valid('json')), 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'get', path: '/v1/studio/affiliates/{id}/statement', summary: 'A month’s statement as CSV',
++    request: { params: idParam('id'), query: z.object({ month }) },
++    responses: { 200: csv('Statement'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    const statement = await affiliates().statement(member.teamId, context.req.valid('param').id, context.req.valid('query').month);
++    return context.body(statement.csv, 200, {
++      'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="${statement.filename}"`,
++    });
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'post', path: '/v1/studio/affiliates/{id}/adjustments', summary: 'A correction by hand, on the next payout',
++    request: { params: idParam('id'), ...body(z.object({ cents: z.number().int().min(-1_000_000).max(1_000_000).refine((value) => value !== 0), note: z.string().trim().min(1).max(300) }).strict()) },
++    responses: { 200: anyJson('Affiliate'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    const input = context.req.valid('json');
++    return context.json(await affiliates().adjust(member.teamId, context.req.valid('param').id, input.cents, input.note, member.userId), 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'post', path: '/v1/studio/affiliates/{id}/payouts', summary: 'Record a payment you made: everything owed through a date',
++    request: { params: idParam('id'), ...body(z.object({ through: date, note: z.string().trim().max(300).nullable().optional() }).strict()) },
++    responses: { 200: anyJson('Payout'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    const input = context.req.valid('json');
++    return context.json(await affiliates().markPaid(member.teamId, context.req.valid('param').id, input.through, member.userId, input.note ?? null), 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'delete', path: '/v1/studio/affiliate-payouts/{id}', summary: 'Undo a payout recorded by mistake (owners only)',
++    request: { params: idParam('id') },
++    responses: { 200: anyJson('Removed'), ...errors },
++  }), async (context) => {
++    const owner = need(context, 'owner');
++    await affiliates().voidPayout(owner.teamId, context.req.valid('param').id);
++    return context.json(ok, 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'post', path: '/v1/studio/affiliates/reconcile', summary: 'Before paying: re-check a month’s purchases against RevenueCat',
++    request: body(z.object({ month }).strict()),
++    responses: { 200: anyJson('Reconciled'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    const events = required(dependencies.events, 'Reconciling (DATABASE_URL)');
++    return context.json(await affiliates().reconcile(member.teamId, context.req.valid('json').month, events), 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'get', path: '/v1/studio/affiliate-flags', summary: 'What needs a look before paying',
++    responses: { 200: anyJson('Flags'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    return context.json({ flags: await affiliates().flags(member.teamId) }, 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'post', path: '/v1/studio/affiliate-flags/{id}/resolve', summary: 'Mark a flag looked at',
++    request: { params: idParam('id') },
++    responses: { 200: anyJson('Resolved'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    await affiliates().resolveFlag(member.teamId, context.req.valid('param').id, member.userId);
++    return context.json(ok, 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'post', path: '/v1/studio/affiliates/{id}/invite', summary: 'An invite code for the affiliate to see their own sales in Hearth Studio (two weeks, one use)',
++    request: { params: idParam('id') },
++    responses: { 200: anyJson('Invite'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    return context.json(await affiliates().invite(member.teamId, context.req.valid('param').id, member.userId), 200);
++  });
++
++  app.openapi(route('Studio affiliates', {
++    method: 'delete', path: '/v1/studio/affiliates/{id}/access', summary: 'End the affiliate’s own sign-in (their credit and payouts stay)',
++    request: { params: idParam('id') },
++    responses: { 200: anyJson('Removed'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'affiliates');
++    await affiliates().unlink(member.teamId, context.req.valid('param').id);
++    return context.json(ok, 200);
++  });
++
++  // MARK: Links
++
++  app.openapi(route('Studio links', {
++    method: 'get', path: '/v1/studio/links', summary: 'Campaign links with taps and App Store numbers',
++    request: { query: z.object({ app: appKey.optional(), days }) },
++    responses: { 200: anyJson('Links'), ...errors },
++  }), async (context) => {
++    const query = context.req.valid('query');
++    return context.json({ links: await links().list(teamOf(context), { ...(query.app ? { app: query.app } : {}), days: query.days }) }, 200);
++  });
++
++  app.openapi(route('Studio links', {
++    method: 'post', path: '/v1/studio/links', summary: 'Make a campaign link (App Store link with a ct= token, and a short link)',
++    request: body(z.object({
++      app: appKey, name: z.string().trim().min(1).max(80), appStoreId: z.string().regex(/^\d{5,15}$/),
++      ct: z.string().regex(/^[A-Za-z0-9._-]{1,40}$/).optional(), slug: z.string().regex(/^[a-z0-9-]{2,60}$/).nullable().optional(),
++      affiliateId: uuid.nullable().optional(),
++    }).strict()),
++    responses: { 200: anyJson('Link'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'post');
++    return context.json(await links().create(member.teamId, member.userId, context.req.valid('json')), 200);
++  });
++
++  app.openapi(route('Studio links', {
++    method: 'get', path: '/v1/studio/links/{id}', summary: 'A link’s numbers day by day',
++    request: { params: idParam('id'), query: z.object({ days }) },
++    responses: { 200: anyJson('Link'), ...errors },
++  }), async (context) => context.json(await links().daily(teamOf(context), context.req.valid('param').id, context.req.valid('query').days), 200));
++
++  app.openapi(route('Studio links', {
++    method: 'patch', path: '/v1/studio/links/{id}', summary: 'Rename a link, change its short link, or credit it to an affiliate (for reporting)',
++    request: {
++      params: idParam('id'),
++      ...body(z.object({ name: z.string().trim().min(1).max(80).optional(), slug: z.string().regex(/^[a-z0-9-]{2,60}$/).nullable().optional(), affiliateId: uuid.nullable().optional() }).strict()),
++    },
++    responses: { 200: anyJson('Link'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'post');
++    return context.json(await links().update(member.teamId, context.req.valid('param').id, context.req.valid('json')), 200);
++  });
++
++  app.openapi(route('Studio links', {
++    method: 'delete', path: '/v1/studio/links/{id}', summary: 'Delete a link (its short link stops working)',
++    request: { params: idParam('id') },
++    responses: { 200: anyJson('Removed'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'post');
++    await links().remove(member.teamId, context.req.valid('param').id);
++    return context.json(ok, 200);
++  });
++
++  app.openapi(route('Studio links', {
++    method: 'get', path: '/v1/studio/appstore/{app}/campaigns', summary: 'An app’s App Store campaign numbers by token',
++    request: { params: z.object({ app: appKey.openapi({ param: { name: 'app', in: 'path' } }) }), query: z.object({ days }) },
++    responses: { 200: anyJson('Campaigns'), ...errors },
++  }), async (context) => context.json(await links().appStore(teamOf(context), context.req.valid('param').app, context.req.valid('query').days), 200));
++
++  app.openapi(route('Studio links', {
++    method: 'post', path: '/v1/studio/appstore/import', summary: 'Import App Store Connect’s campaign numbers now',
++    responses: { 200: anyJson('Imported'), ...errors },
++  }), async (context) => {
++    const member = need(context, 'post');
++    const run = required(dependencies.importStats, 'App Store Connect (ASC_KEY_ID, ASC_ISSUER_ID, ASC_PRIVATE_KEY)');
++    return context.json({ apps: await run(member.teamId) }, 200);
++  });
++
++  // MARK: The affiliate's own
++
++  const mine = async (context: Pick<Context<ApiEnvironment>, 'get'>) => {
++    if (context.get('isAnonymous')) throw new ApiError(403, 'REGISTERED_IDENTITY_REQUIRED', 'Sign in with Apple to see your sales');
++    const found = await affiliates().forUser(context.get('userId'));
++    if (!found) throw new ApiError(403, 'NOT_AN_AFFILIATE', 'This account isn’t an affiliate. Ask Hearth Software for an invite.');
++    return found;
++  };
++
++  app.openapi(route('Affiliate', {
++    method: 'post', path: '/v1/affiliate/invites/{code}/join', summary: 'Join as an affiliate with an invite code',
++    request: { params: z.object({ code: z.string().regex(/^[A-Za-z2-9]{8}$/).openapi({ param: { name: 'code', in: 'path' } }) }) },
++    responses: { 200: anyJson('Joined'), ...errors },
++  }), async (context) => {
++    if (context.get('isAnonymous')) throw new ApiError(403, 'REGISTERED_IDENTITY_REQUIRED', 'Sign in with Apple to join');
++    await affiliates().join(context.req.valid('param').code, context.get('userId'));
++    return context.json(ok, 200);
++  });
++
++  app.openapi(route('Affiliate', {
++    method: 'get', path: '/v1/affiliate/me', summary: 'Your sales, what you’re owed, payouts, codes and links',
++    request: { query: z.object({ month: month.optional() }) },
++    responses: { 200: anyJson('Overview'), ...errors },
++  }), async (context) => {
++    const { team, id } = await mine(context);
++    const affiliate = await affiliates().get(team, id);
++    const { contact: _contact, ...self } = affiliate;
++    const theirLinks = dependencies.links() ? await links().list(team, { affiliateId: id }) : [];
++    return context.json({
++      affiliate: self,
++      codes: (await affiliates().codes(team, id)).filter((entry) => entry.active),
++      links: theirLinks.map(({ affiliateId: _a, affiliateName: _n, ...link }) => link),
++      credits: await affiliates().credits(team, id, context.req.valid('query').month),
++      payouts: await affiliates().payouts(team, id),
++    }, 200);
++  });
++
++  app.openapi(route('Affiliate', {
++    method: 'get', path: '/v1/affiliate/me/statement', summary: 'Your statement for a month, as CSV',
++    request: { query: z.object({ month }) },
++    responses: { 200: csv('Statement'), ...errors },
++  }), async (context) => {
++    const { team, id } = await mine(context);
++    const statement = await affiliates().statement(team, id, context.req.valid('query').month);
++    return context.body(statement.csv, 200, {
++      'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="${statement.filename}"`,
++    });
++  });
++
++  // MARK: Short links (public)
++
++  app.get('/go/:slug', async (context) => {
++    const slug = context.req.param('slug').toLowerCase();
++    const service = dependencies.links();
++    const target = service && /^[a-z0-9-]{2,60}$/.test(slug) ? await service.follow(slug, context.req.header('user-agent')) : undefined;
++    if (!target) return context.text('This link isn’t available.', 404);
++    context.header('cache-control', 'no-store');
++    context.header('referrer-policy', 'no-referrer');
++    return context.redirect(target, 302);
++  });
++
++  // An app's referral field: is this code real for this app? (Says nothing about who owns it.)
++  app.openapi(route('Affiliate', {
++    method: 'get', path: '/v1/affiliate/codes/{code}', summary: 'Whether a referral code works for an app',
++    request: {
++      params: z.object({ code: z.string().regex(/^[A-Za-z0-9_-]{3,40}$/).openapi({ param: { name: 'code', in: 'path' } }) }),
++      query: z.object({ app: appKey }),
++    },
++    responses: { 200: anyJson('Valid'), ...errors },
++  }), async (context) => context.json(await affiliates().checkCode(context.req.valid('param').code, context.req.valid('query').app), 200));
++}
+diff --git a/src/affiliates/service.ts b/src/affiliates/service.ts
+new file mode 100644
+index 0000000..f518ecb
+--- /dev/null
++++ b/src/affiliates/service.ts
+@@ -0,0 +1,476 @@
++import type { Sql } from 'postgres';
++import { ApiError } from '../errors.js';
++import { isUniqueViolation, newInviteCode } from '../hearken/service.js';
++import {
++  addMonths, commissionCents, formatCents, isRefund, monthRange, normalizeCode, proceedsCents, readPurchaseEvent, transactionKey,
++} from './credit.js';
++import type { PurchaseEvent } from './credit.js';
++
++/**
++ * Affiliates: their terms and codes, the exact credit RevenueCat purchases earn them, payouts,
++ * statements, and their own sign-in. See supabase/migrations/20261029200000_affiliates_and_links.sql.
++ */
++
++export type AffiliateTerms = { rateBps: number | null; flatCents: number | null; windowMonths: number };
++
++export type AffiliateView = {
++  id: string;
++  name: string;
++  contact: string | null;
++  terms: AffiliateTerms;
++  active: boolean;
++  /** Has signed in to see their own sales. */
++  joined: boolean;
++  /** Unpaid commission. */
++  owedCents: number;
++  /** Commission and paid sales this calendar month (UTC). */
++  monthCents: number;
++  monthSales: number;
++  apps: string[];
++  createdAt: string;
++};
++
++export type CodeView = { id: string; affiliateId: string; app: string; code: string; kind: 'apple_offer' | 'referral'; offerRef: string | null; active: boolean; createdAt: string };
++
++export type CreditView = {
++  id: string; affiliateId: string; app: string; product: string; kind: 'purchase' | 'renewal' | 'refund' | 'adjustment';
++  proceedsCents: number; commissionCents: number; occurredAt: string; paid: boolean; note: string | null;
++};
++
++export type PayoutView = { id: string; affiliateId: string; through: string; totalCents: number; note: string | null; paidAt: string; credits: number };
++
++export type FlagView = { id: string; affiliateId: string | null; kind: string; detail: string; createdAt: string };
++
++export type CreditOutcome =
++  | { outcome: 'ignored'; reason: string }
++  | { outcome: 'duplicate' }
++  | { outcome: 'attributed'; affiliateId: string }
++  | { outcome: 'credited'; affiliateId: string; commissionCents: number }
++  | { outcome: 'refunded'; affiliateId: string; commissionCents: number }
++  | { outcome: 'unknown_code'; code: string };
++
++const iso = (value: unknown) => (value instanceof Date ? value.toISOString() : String(value));
++const day = (value: unknown) => (value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10));
++const int = (value: unknown) => Number(value ?? 0);
++
++function code(row: Record<string, unknown>): CodeView {
++  return {
++    id: String(row.id), affiliateId: String(row.affiliate_id), app: String(row.app), code: String(row.code),
++    kind: row.kind as CodeView['kind'], offerRef: (row.offer_ref as string | null) ?? null, active: row.active === true, createdAt: iso(row.created_at),
++  };
++}
++
++function credit(row: Record<string, unknown>): CreditView {
++  return {
++    id: String(row.id), affiliateId: String(row.affiliate_id), app: String(row.app), product: String(row.product), kind: row.kind as CreditView['kind'],
++    proceedsCents: int(row.proceeds_cents), commissionCents: int(row.commission_cents), occurredAt: iso(row.occurred_at),
++    paid: row.payout_id != null, note: (row.note as string | null) ?? null,
++  };
++}
++
++function payout(row: Record<string, unknown>): PayoutView {
++  return {
++    id: String(row.id), affiliateId: String(row.affiliate_id), through: day(row.through), totalCents: int(row.total_cents),
++    note: (row.note as string | null) ?? null, paidAt: iso(row.paid_at), credits: int(row.credits),
++  };
++}
++
++export type AffiliateService = ReturnType<typeof createAffiliateService>;
++
++export function createAffiliateService(sql: Sql, options: { secret: Buffer; acceptSandbox?: boolean; now?: () => number }) {
++  const now = options.now ?? Date.now;
++  const thisMonth = () => new Date(now()).toISOString().slice(0, 7);
++
++  /** Affiliates with their money summed (one query for a list or one). */
++  async function views(team: string, id?: string): Promise<AffiliateView[]> {
++    const { start, end } = monthRange(thisMonth());
++    const rows = await sql`
++      select a.*,
++        coalesce((select sum(c.commission_cents) from affiliate_credits c where c.affiliate_id = a.id and c.payout_id is null), 0) as owed,
++        coalesce((select sum(c.commission_cents) from affiliate_credits c where c.affiliate_id = a.id
++          and c.occurred_at >= ${start} and c.occurred_at < ${end}), 0) as month_cents,
++        (select count(*) from affiliate_credits c where c.affiliate_id = a.id and c.kind in ('purchase', 'renewal')
++          and c.occurred_at >= ${start} and c.occurred_at < ${end}) as month_sales,
++        coalesce((select array_agg(distinct k.app order by k.app) from affiliate_codes k where k.affiliate_id = a.id), '{}') as apps
++      from affiliates a
++      where a.team_id = ${team} and (${id ?? null}::uuid is null or a.id = ${id ?? null})
++      order by a.active desc, a.name`;
++    return rows.map((row) => ({
++      id: String(row.id), name: String(row.name), contact: (row.contact as string | null) ?? null,
++      terms: { rateBps: row.rate_bps == null ? null : int(row.rate_bps), flatCents: row.flat_cents == null ? null : int(row.flat_cents), windowMonths: int(row.window_months) },
++      active: row.active === true, joined: row.user_id != null,
++      owedCents: int(row.owed), monthCents: int(row.month_cents), monthSales: int(row.month_sales),
++      apps: (row.apps as string[]) ?? [], createdAt: iso(row.created_at),
++    }));
++  }
++
++  async function one(team: string, id: string) {
++    const [found] = await views(team, id);
++    if (!found) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Affiliate not found');
++    return found;
++  }
++
++  function checkTerms(terms: { rateBps?: number | null | undefined; flatCents?: number | null | undefined }) {
++    const rate = terms.rateBps ?? null, flat = terms.flatCents ?? null;
++    if ((rate === null) === (flat === null)) throw new ApiError(400, 'INVALID_REQUEST', 'Give either a percentage or a flat amount');
++    return { rate, flat };
++  }
++
++  async function codeFor(value: string | null): Promise<(CodeView & { teamId: string }) | undefined> {
++    if (!value) return undefined;
++    const upper = normalizeCode(value);
++    const [row] = await sql`
++      select k.*, k.team_id as team from affiliate_codes k join affiliates a on a.id = k.affiliate_id
++      where k.active and a.active and (k.code = ${upper ?? ''} or k.offer_ref = ${value.trim()})
++      limit 1`;
++    return row ? { ...code(row), teamId: String(row.team) } : undefined;
++  }
++
++  // MARK: Credit
++
++  /** One RevenueCat webhook event: starts an attribution, credits a purchase, or claws back a refund. Idempotent. */
++  async function creditEvent(body: unknown): Promise<CreditOutcome> {
++    const event = readPurchaseEvent(body);
++    if (!event) return { outcome: 'ignored', reason: 'not a purchase or refund' };
++    if (event.environment === 'SANDBOX' && !options.acceptSandbox) return { outcome: 'ignored', reason: 'sandbox' };
++    const [seen] = await sql`select 1 from affiliate_credits where event_id = ${event.id}`;
++    if (seen) return { outcome: 'duplicate' };
++    if (!event.originalTransactionId) return { outcome: 'ignored', reason: 'no transaction id' };
++    const subscriptionKey = transactionKey(options.secret, event.store, event.originalTransactionId);
++    const purchaseKey = event.transactionId ? transactionKey(options.secret, event.store, event.transactionId) : null;
++    if (isRefund(event.type, event.cancelReason)) return refund(event, subscriptionKey, purchaseKey);
++    return purchase(event, subscriptionKey, purchaseKey);
++  }
++
++  async function purchase(event: PurchaseEvent, subscriptionKey: string, purchaseKey: string | null): Promise<CreditOutcome> {
++    const used = normalizeCode(event.offerCode) ?? normalizeCode(event.referralCode);
++    const matched = await codeFor(event.offerCode) ?? await codeFor(event.referralCode);
++    return sql.begin(async (tx) => {
++      let [attribution] = await tx`select * from affiliate_attributions where subscription_key = ${subscriptionKey} for update`;
++      if (!attribution) {
++        if (!matched) return used ? { outcome: 'unknown_code', code: used } as const : { outcome: 'ignored', reason: 'no code' } as const;
++        const [affiliate] = await tx`select window_months from affiliates where id = ${matched.affiliateId}`;
++        const ends = addMonths(event.occurredAt, int(affiliate!.window_months));
++        [attribution] = await tx`
++          insert into affiliate_attributions (team_id, affiliate_id, code_id, app, subscription_key, started_at, ends_at)
++          values (${matched.teamId}, ${matched.affiliateId}, ${matched.id}, ${matched.app}, ${subscriptionKey}, ${event.occurredAt}, ${ends})
++          on conflict (team_id, subscription_key) do nothing
++          returning *`;
++        if (!attribution) [attribution] = await tx`select * from affiliate_attributions where subscription_key = ${subscriptionKey} for update`;
++      }
++      const affiliateId = String(attribution!.affiliate_id);
++      if (event.occurredAt < (attribution!.started_at as Date) || event.occurredAt >= (attribution!.ends_at as Date)) {
++        return { outcome: 'ignored', reason: 'outside the credit window' } as const;
++      }
++      const proceeds = proceedsCents(event.priceUsd, event.takehome);
++      if (proceeds <= 0) return { outcome: 'attributed', affiliateId } as const;
++      const [terms] = await tx`select rate_bps, flat_cents from affiliates where id = ${affiliateId}`;
++      const commission = commissionCents(proceeds, {
++        rateBps: terms!.rate_bps == null ? null : int(terms!.rate_bps),
++        flatCents: terms!.flat_cents == null ? null : int(terms!.flat_cents),
++      }, attribution!.flat_paid === true);
++      const [made] = await tx`
++        insert into affiliate_credits (team_id, affiliate_id, attribution_id, event_id, transaction_key, app, product, kind,
++          proceeds_cents, commission_cents, occurred_at)
++        values (${attribution!.team_id}, ${affiliateId}, ${attribution!.id}, ${event.id}, ${purchaseKey}, ${attribution!.app},
++          ${event.productId.slice(0, 200)}, ${event.type === 'RENEWAL' ? 'renewal' : 'purchase'}, ${proceeds}, ${commission}, ${event.occurredAt})
++        on conflict (event_id) do nothing
++        returning id`;
++      if (!made) return { outcome: 'duplicate' } as const;
++      if (terms!.flat_cents != null && commission > 0) {
++        await tx`update affiliate_attributions set flat_paid = true where id = ${attribution!.id}`;
++      }
++      return { outcome: 'credited', affiliateId, commissionCents: commission } as const;
++    }) as Promise<CreditOutcome>;
++  }
++
++  async function refund(event: PurchaseEvent, subscriptionKey: string, purchaseKey: string | null): Promise<CreditOutcome> {
++    return sql.begin(async (tx) => {
++      const [attribution] = await tx`select * from affiliate_attributions where subscription_key = ${subscriptionKey} for update`;
++      if (!attribution) return { outcome: 'ignored', reason: 'not an affiliate subscription' } as const;
++      const affiliateId = String(attribution.affiliate_id);
++      const [original] = purchaseKey
++        ? await tx`select * from affiliate_credits where transaction_key = ${purchaseKey} and kind in ('purchase', 'renewal') limit 1`
++        : [];
++      if (!original) {
++        // A refunded free trial earned nothing; anything else needs a look before the next payout.
++        if (event.priceUsd < 0) {
++          await tx`
++            insert into affiliate_flags (team_id, affiliate_id, kind, detail, event_id)
++            values (${attribution.team_id}, ${affiliateId}, 'refund_without_purchase',
++              ${`A refund of ${formatCents(Math.round(event.priceUsd * 100))} for ${event.productId} matched no credited purchase.`}, ${event.id})
++            on conflict do nothing`;
++        }
++        return { outcome: 'ignored', reason: 'no credited purchase to refund' } as const;
++      }
++      const [already] = await tx`select 1 from affiliate_credits where transaction_key = ${purchaseKey} and kind = 'refund'`;
++      if (already) return { outcome: 'duplicate' } as const;
++      const commission = -int(original.commission_cents);
++      const [made] = await tx`
++        insert into affiliate_credits (team_id, affiliate_id, attribution_id, event_id, transaction_key, app, product, kind,
++          proceeds_cents, commission_cents, occurred_at, note)
++        values (${attribution.team_id}, ${affiliateId}, ${attribution.id}, ${event.id}, ${purchaseKey}, ${original.app},
++          ${original.product}, 'refund', ${-int(original.proceeds_cents)}, ${commission}, ${event.occurredAt},
++          ${original.payout_id ? 'Refund of a purchase already paid out: taken off the next payout' : null})
++        on conflict (event_id) do nothing
++        returning id`;
++      if (!made) return { outcome: 'duplicate' } as const;
++      return { outcome: 'refunded', affiliateId, commissionCents: commission } as const;
++    }) as Promise<CreditOutcome>;
++  }
++
++  return {
++    creditEvent,
++    list: (team: string) => views(team),
++    get: one,
++
++    async create(team: string, input: { name: string; contact?: string | null | undefined; rateBps?: number | null | undefined; flatCents?: number | null | undefined; windowMonths?: number | undefined }) {
++      const { rate, flat } = checkTerms(input);
++      const [row] = await sql`
++        insert into affiliates (team_id, name, contact, rate_bps, flat_cents, window_months)
++        values (${team}, ${input.name}, ${input.contact ?? null}, ${rate}, ${flat}, ${input.windowMonths ?? 12})
++        returning id`;
++      return one(team, String(row!.id));
++    },
++
++    async update(team: string, id: string, patch: {
++      name?: string | undefined; contact?: string | null | undefined; rateBps?: number | null | undefined; flatCents?: number | null | undefined;
++      windowMonths?: number | undefined; active?: boolean | undefined;
++    }) {
++      const current = await one(team, id);
++      const termsChange = patch.rateBps !== undefined || patch.flatCents !== undefined;
++      const { rate, flat } = termsChange
++        ? checkTerms({ rateBps: patch.rateBps !== undefined ? patch.rateBps : null, flatCents: patch.flatCents !== undefined ? patch.flatCents : null })
++        : { rate: current.terms.rateBps, flat: current.terms.flatCents };
++      // New terms apply to purchases from now on; what's credited stays as it was.
++      await sql`
++        update affiliates set
++          name = ${patch.name ?? current.name},
++          contact = ${patch.contact !== undefined ? patch.contact : current.contact},
++          rate_bps = ${rate}, flat_cents = ${flat},
++          window_months = ${patch.windowMonths ?? current.terms.windowMonths},
++          active = ${patch.active ?? current.active},
++          updated_at = now()
++        where id = ${id} and team_id = ${team}`;
++      return one(team, id);
++    },
++
++    // MARK: Codes
++
++    async codes(team: string, affiliateId?: string) {
++      const rows = await sql`
++        select * from affiliate_codes where team_id = ${team} and (${affiliateId ?? null}::uuid is null or affiliate_id = ${affiliateId ?? null})
++        order by active desc, created_at`;
++      return rows.map(code);
++    },
++
++    async addCode(team: string, affiliateId: string, input: { app: string; code: string; kind: 'apple_offer' | 'referral'; offerRef?: string | null | undefined }) {
++      await one(team, affiliateId);
++      const upper = normalizeCode(input.code);
++      if (!upper) throw new ApiError(400, 'INVALID_REQUEST', 'A code is 3–40 letters, digits, - or _');
++      try {
++        const [row] = await sql`
++          insert into affiliate_codes (team_id, affiliate_id, app, code, kind, offer_ref)
++          values (${team}, ${affiliateId}, ${input.app}, ${upper}, ${input.kind}, ${input.offerRef ?? null})
++          returning *`;
++        return code(row!);
++      } catch (error) {
++        if (isUniqueViolation(error)) throw new ApiError(409, 'CODE_TAKEN', `${upper} is already someone’s code`);
++        throw error;
++      }
++    },
++
++    async updateCode(team: string, id: string, patch: { active?: boolean | undefined; offerRef?: string | null | undefined }) {
++      const [row] = await sql`
++        update affiliate_codes set
++          active = coalesce(${patch.active ?? null}, active),
++          offer_ref = case when ${patch.offerRef !== undefined} then ${patch.offerRef ?? null} else offer_ref end
++        where id = ${id} and team_id = ${team}
++        returning *`;
++      if (!row) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Code not found');
++      return code(row);
++    },
++
++    /** Whether an app's referral field should accept a code (it says nothing about who owns it). */
++    async checkCode(value: string, app: string) {
++      const found = await codeFor(value);
++      return { valid: Boolean(found && found.app === app) };
++    },
++
++    // MARK: Credits, payouts, statements
++
++    async credits(team: string, affiliateId: string, month?: string) {
++      const range = month ? monthRange(month) : null;
++      const rows = await sql`
++        select * from affiliate_credits
++        where team_id = ${team} and affiliate_id = ${affiliateId}
++          and (${range?.start ?? null}::timestamptz is null or (occurred_at >= ${range?.start ?? null} and occurred_at < ${range?.end ?? null}))
++        order by occurred_at desc
++        limit 500`;
++      return rows.map(credit);
++    },
++
++    async payouts(team: string, affiliateId: string) {
++      const rows = await sql`
++        select p.*, (select count(*) from affiliate_credits c where c.payout_id = p.id) as credits
++        from affiliate_payouts p where p.team_id = ${team} and p.affiliate_id = ${affiliateId}
++        order by p.paid_at desc`;
++      return rows.map(payout);
++    },
++
++    async flags(team: string, affiliateId?: string) {
++      const rows = await sql`
++        select * from affiliate_flags
++        where team_id = ${team} and resolved_at is null and (${affiliateId ?? null}::uuid is null or affiliate_id = ${affiliateId ?? null})
++        order by created_at desc`;
++      return rows.map((row): FlagView => ({
++        id: String(row.id), affiliateId: (row.affiliate_id as string | null) ?? null, kind: String(row.kind), detail: String(row.detail), createdAt: iso(row.created_at),
++      }));
++    },
++
++    async resolveFlag(team: string, id: string, by: string) {
++      const [row] = await sql`update affiliate_flags set resolved_at = now(), resolved_by = ${by} where id = ${id} and team_id = ${team} returning id`;
++      if (!row) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Flag not found');
++    },
++
++    /** A correction by hand (positive or negative), on the next payout. */
++    async adjust(team: string, affiliateId: string, cents: number, note: string, by: string) {
++      const affiliate = await one(team, affiliateId);
++      await sql`
++        insert into affiliate_credits (team_id, affiliate_id, event_id, app, product, kind, proceeds_cents, commission_cents, occurred_at, note)
++        values (${team}, ${affiliateId}, ${`adjustment:${by}:${now()}`}, ${affiliate.apps[0] ?? 'hearth'}, 'Adjustment', 'adjustment', 0, ${cents}, ${new Date(now())}, ${note})`;
++      return one(team, affiliateId);
++    },
++
++    /** Records a payment you made: every unpaid credit through the end of `through` (UTC). */
++    async markPaid(team: string, affiliateId: string, through: string, by: string, note: string | null) {
++      await one(team, affiliateId);
++      const end = new Date(`${through}T00:00:00.000Z`);
++      if (Number.isNaN(end.getTime())) throw new ApiError(400, 'INVALID_REQUEST', 'A date looks like 2026-10-31');
++      end.setUTCDate(end.getUTCDate() + 1);
++      const [open] = await sql`select count(*) as n from affiliate_flags where affiliate_id = ${affiliateId} and resolved_at is null`;
++      if (int(open!.n) > 0) throw new ApiError(409, 'FLAGS_OPEN', 'Look at this affiliate’s open flags before paying.');
++      return sql.begin(async (tx) => {
++        const rows = await tx`
++          select id, commission_cents from affiliate_credits
++          where affiliate_id = ${affiliateId} and payout_id is null and occurred_at < ${end}
++          for update`;
++        const total = rows.reduce((sum, row) => sum + int(row.commission_cents), 0);
++        if (rows.length === 0 || total <= 0) throw new ApiError(409, 'NOTHING_OWED', 'Nothing is owed through that date.');
++        const [made] = await tx`
++          insert into affiliate_payouts (team_id, affiliate_id, through, total_cents, paid_by, note)
++          values (${team}, ${affiliateId}, ${through}, ${total}, ${by}, ${note})
++          returning *`;
++        await tx`update affiliate_credits set payout_id = ${made!.id} where id in ${tx(rows.map((row) => String(row.id)))}`;
++        return payout({ ...made!, credits: rows.length });
++      }) as Promise<PayoutView>;
++    },
++
++    /** Undoes a payout recorded by mistake: its credits are owed again. */
++    async voidPayout(team: string, id: string) {
++      await sql.begin(async (tx) => {
++        const [found] = await tx`select id from affiliate_payouts where id = ${id} and team_id = ${team} for update`;
++        if (!found) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Payout not found');
++        await tx`update affiliate_credits set payout_id = null where payout_id = ${id}`;
++        await tx`delete from affiliate_payouts where id = ${id}`;
++      });
++    },
++
++    /** A month's statement as CSV: one line per credit, then the total. */
++    async statement(team: string, affiliateId: string, month: string) {
++      const affiliate = await one(team, affiliateId);
++      const range = monthRange(month);
++      const rows = await sql`
++        select * from affiliate_credits where affiliate_id = ${affiliateId} and occurred_at >= ${range.start} and occurred_at < ${range.end}
++        order by occurred_at`;
++      const quote = (value: string) => (/[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value);
++      const lines = ['Date,App,Plan,Kind,Proceeds (USD),Your share (USD),Paid'];
++      let total = 0;
++      for (const row of rows.map(credit)) {
++        total += row.commissionCents;
++        lines.push([row.occurredAt.slice(0, 10), row.app, quote(row.product), row.kind,
++          (row.proceedsCents / 100).toFixed(2), (row.commissionCents / 100).toFixed(2), row.paid ? 'yes' : 'no'].join(','));
++      }
++      lines.push(`Total,,,,,${(total / 100).toFixed(2)},`);
++      return { filename: `${affiliate.name.replace(/[^A-Za-z0-9]+/g, '-')}-${month}.csv`, csv: `${lines.join('\n')}\n` };
++    },
++
++    // MARK: Reconciling
++
++    /**
++     * Before paying a month: replays every RevenueCat event stored for it (revenuecat_webhook_events)
++     * through the same crediting, which adds any credit a failed webhook missed, and flags codes
++     * that match no affiliate. Safe to run any number of times.
++     */
++    async reconcile(team: string, month: string, events: (start: Date, end: Date) => Promise<unknown[]>) {
++      const { start, end } = monthRange(month);
++      // Events arrive a little after they happen: look a week past the month.
++      const payloads = await events(new Date(start.getTime() - 3 * 86_400_000), new Date(end.getTime() + 7 * 86_400_000));
++      let checked = 0, added = 0, unknown = 0;
++      for (const payload of payloads) {
++        const event = readPurchaseEvent(payload);
++        if (!event || event.occurredAt < start || event.occurredAt >= end) continue;
++        checked += 1;
++        const result = await creditEvent(payload);
++        if (result.outcome === 'credited' || result.outcome === 'refunded') added += 1;
++        if (result.outcome === 'unknown_code') {
++          unknown += 1;
++          await sql`
++            insert into affiliate_flags (team_id, kind, detail, event_id)
++            values (${team}, 'unknown_code', ${`Code ${result.code} was used on ${event.productId} but matches no affiliate.`}, ${event.id})
++            on conflict do nothing`;
++        }
++      }
++      return { month, checked, added, unknownCodes: unknown, openFlags: (await this.flags(team)).length };
++    },
++
++    // MARK: The affiliate's own sign-in
++
++    async invite(team: string, affiliateId: string, by: string) {
++      await one(team, affiliateId);
++      const expiresAt = new Date(now() + 14 * 86_400_000);
++      for (let attempt = 0; attempt < 5; attempt += 1) {
++        const value = newInviteCode();
++        try {
++          await sql`
++            insert into affiliate_invites (code, team_id, affiliate_id, created_by, expires_at)
++            values (${value}, ${team}, ${affiliateId}, ${by}, ${expiresAt})`;
++          return { code: value, expiresAt: expiresAt.toISOString() };
++        } catch (error) {
++          if (!isUniqueViolation(error)) throw error;
++        }
++      }
++      throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Couldn’t make an invite code');
++    },
++
++    async join(value: string, userId: string) {
++      return sql.begin(async (tx) => {
++        const [invite] = await tx`
++          select * from affiliate_invites where code = ${value.trim().toUpperCase()} and used_at is null and expires_at > ${new Date(now())} for update`;
++        if (!invite) throw new ApiError(404, 'INVITE_NOT_FOUND', 'That invite is used, expired or doesn’t exist. Ask for a new one.');
++        const [other] = await tx`select id from affiliates where user_id = ${userId} and id <> ${invite.affiliate_id}`;
++        if (other) throw new ApiError(409, 'ALREADY_AFFILIATE', 'This account already belongs to another affiliate.');
++        await tx`update affiliates set user_id = ${userId}, updated_at = now() where id = ${invite.affiliate_id}`;
++        await tx`update affiliate_invites set used_by = ${userId}, used_at = now() where code = ${invite.code}`;
++        return String(invite.affiliate_id);
++      }) as Promise<string>;
++    },
++
++    /** Ends an affiliate's own access (their credit and payouts stay). */
++    async unlink(team: string, affiliateId: string) {
++      await sql`update affiliates set user_id = null, updated_at = now() where id = ${affiliateId} and team_id = ${team}`;
++    },
++
++    /** A deleted Hearth account: no affiliate signs in with it any more. */
++    async forgetUser(userId: string) {
++      await sql`update affiliates set user_id = null, updated_at = now() where user_id = ${userId}`;
++      await sql`update affiliate_invites set used_by = null where used_by = ${userId}`;
++    },
++
++    /** The affiliate a signed-in account is, with its team (active ones only). */
++    async forUser(userId: string): Promise<{ team: string; id: string } | undefined> {
++      const [row] = await sql`select id, team_id from affiliates where user_id = ${userId} and active`;
++      return row ? { team: String(row.team_id), id: String(row.id) } : undefined;
++    },
++  };
++}
+diff --git a/src/app.ts b/src/app.ts
+index 2fc3ad3..9c103c8 100644
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1,4 +1,4 @@
+-import { randomUUID } from 'node:crypto';
++import { hkdfSync, randomUUID } from 'node:crypto';
+ import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi';
+ import { secureHeaders } from 'hono/secure-headers';
+ import { HTTPException } from 'hono/http-exception';
+@@ -68,6 +68,13 @@ import type { SocialStore } from './social/store.js';
+ import { createMetaClient } from './social/meta.js';
+ import type { MetaClient } from './social/meta.js';
+ import { registerStudio } from './studio/routes.js';
++import { registerAffiliates } from './affiliates/routes.js';
++import { createAffiliateService } from './affiliates/service.js';
++import type { AffiliateService } from './affiliates/service.js';
++import { createLinkService } from './affiliates/links.js';
++import type { LinkService } from './affiliates/links.js';
++import { createAscClient, importCampaignStats } from './affiliates/asc.js';
++import { setAffiliateCredit } from './affiliates/hook.js';
+ import { createTeamService } from './studio/team.js';
+ import type { TeamService } from './studio/team.js';
+ import { createLibraryService } from './studio/library.js';
+@@ -123,6 +130,8 @@ export type AppOptions = {
+     team?: TeamService; library?: LibraryService; storage?: StudioStorage; documents?: DocumentsService;
+     plans?: PlansBackend; apps?: GitHubApps; notifier?: StudioNotifier; sql?: Sql;
+   };
++  /** Affiliates and campaign links. Built from DATABASE_URL, SOCIAL_TOKEN_KEY and ASC_* when not given. */
++  affiliates?: { service?: AffiliateService; links?: LinkService; importStats?: (team: string) => Promise<unknown> };
+ };
+ 
+ type RequestLog = {
+@@ -392,9 +401,44 @@ export function createApp(options: AppOptions = {}) {
+     sql: () => options.studio?.sql ?? database,
+   });
+ 
++  // Affiliates: credit keyed on an HMAC of store transaction ids, with a key derived from SOCIAL_TOKEN_KEY.
++  const affiliateService = options.affiliates?.service ?? (database && config.SOCIAL_TOKEN_KEY
++    ? createAffiliateService(database, {
++      secret: Buffer.from(hkdfSync('sha256', Buffer.from(config.SOCIAL_TOKEN_KEY, 'base64'), Buffer.alloc(0), 'hearth-affiliate-transactions', 32)),
++      acceptSandbox: config.AFFILIATES_ACCEPT_SANDBOX,
++    })
++    : undefined);
++  setAffiliateCredit(affiliateService);
++  const linkService = options.affiliates?.links ?? (database
++    ? createLinkService(database, { providerId: config.ASC_PROVIDER_ID, shortBase: config.SHORT_LINK_BASE })
++    : undefined);
++  const importStats = options.affiliates?.importStats ?? (database && linkService && config.ASC_KEY_ID && config.ASC_ISSUER_ID && config.ASC_PRIVATE_KEY
++    ? ((client) => (team: string) => importCampaignStats(database, client, linkService, team))(
++      createAscClient({ keyId: config.ASC_KEY_ID, issuerId: config.ASC_ISSUER_ID, privateKey: config.ASC_PRIVATE_KEY }, options.fetcher ?? fetch))
++    : undefined);
++  registerAffiliates(app, {
++    affiliates: () => affiliateService,
++    links: () => linkService,
++    events: () => (database
++      ? async (start: Date, end: Date) => (await database`
++          select payload from revenuecat_webhook_events where processed_at >= ${start} and processed_at < ${end} order by processed_at`)
++        .map((row) => row.payload as unknown)
++      : undefined),
++    importStats: () => importStats,
++  });
++  // App Store Connect's campaign numbers, daily (they arrive a day or two late).
++  app.get('/internal/affiliates/cron', async (context) => {
++    requireCronSecret(config, context.req.header('Authorization'));
++    if (!database || !importStats) return context.json({ skipped: 'App Store Connect is not configured' }, 200);
++    const teams = await database`select distinct team_id from campaign_links where deleted_at is null`;
++    const results = [];
++    for (const row of teams) results.push({ team: String(row.team_id), apps: await importStats(String(row.team_id)) });
++    return context.json({ teams: results }, 200);
++  });
++
+   // DELETE /v1/me and DELETE /v1/bigtable/me share one deletion, which needs these.
+   setAccountDeletionDependencies({
+-    plaidClient: plaidDataClient, connections: connectionStore, seal: tokenSeal, hearken, budgetGroups, reports,
++    plaidClient: plaidDataClient, connections: connectionStore, seal: tokenSeal, hearken, budgetGroups, reports, affiliates: affiliateService,
+   });
+   registerAccount(app);
+ 
+diff --git a/src/bigtable/routes/webhooks.revenuecat.ts b/src/bigtable/routes/webhooks.revenuecat.ts
+index 6ebf81a..5bf5243 100644
+--- a/src/bigtable/routes/webhooks.revenuecat.ts
++++ b/src/bigtable/routes/webhooks.revenuecat.ts
+@@ -7,6 +7,7 @@ import { fetchRevenueCatEntitlements } from "../../services/revenuecat-entitleme
+ import { ensureProfileForAccount } from "../../services/profiles.js";
+ import { supabaseAdmin } from "../../services/supabase.js";
+ import { serverError } from "../lib/server-error.js";
++import { creditAffiliateEvent } from "../../affiliates/hook.js";
+ 
+ export async function POST(request: NextRequest) {
+   const webhookSecret = process.env.REVENUECAT_WEBHOOK_SECRET;
+@@ -59,6 +60,13 @@ export async function POST(request: NextRequest) {
+     return NextResponse.json({ ok: true, duplicate: true }, { status: 200 });
+   }
+ 
++  // Affiliate credit doesn't depend on a Hearth profile: any purchase with an affiliate's code counts.
++  try {
++    await creditAffiliateEvent(parsedBody);
++  } catch (error) {
++    return serverError("POST /api/webhooks/revenuecat affiliate credit failed", "Failed to process webhook", error);
++  }
++
+   let profileLookup = await supabaseAdmin
+     .from("profiles")
+     .select("id")
+diff --git a/src/config.ts b/src/config.ts
+index 0271d2f..2f60b5f 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -90,6 +90,19 @@ const configSchema = z.object({
+   GITHUB_APP_PRIVATE_KEY: z.string().trim().includes('PRIVATE KEY').optional(),
+   GITHUB_ORG: z.string().trim().regex(/^[A-Za-z0-9-]{1,39}$/).default('Hearth-Software-LLC'),
+   STUDIO_APNS_TOPIC: z.string().trim().regex(/^[A-Za-z0-9.-]+$/).default('com.stephenwarren.hearthstudio'),
++  // Affiliates and campaign links (src/affiliates). An App Store Connect API key (Users and
++  // Access › Integrations › App Store Connect API; the Admin role, once, to request the analytics
++  // reports) for campaign downloads and proceeds by ct= token, and the App Store provider id
++  // (the pt= in campaign links: App Store Connect › Analytics › Campaigns shows it).
++  ASC_KEY_ID: z.string().trim().regex(/^[A-Z0-9]{10}$/).optional(),
++  ASC_ISSUER_ID: z.uuid().optional(),
++  ASC_PRIVATE_KEY: z.string().trim().includes('PRIVATE KEY').optional(),
++  ASC_PROVIDER_ID: z.string().trim().regex(/^\d{3,15}$/).optional(),
++  // Where short links live (GET /go/<slug> on this API, or a site that forwards there).
++  SHORT_LINK_BASE: httpsUrl.default('https://hearthapps.com/go'),
++  // Credit sandbox purchases to affiliates (for testing only).
++  AFFILIATES_ACCEPT_SANDBOX: z.enum(['true', 'false', '1', '0']).default('false')
++    .transform((value) => value === 'true' || value === '1'),
+   // Vercel Cron sends it as a bearer token to /internal/* jobs.
+   CRON_SECRET: z.string().trim().min(16).optional(),
+   // Where links the API hands out point (study group invites).
+@@ -111,6 +124,7 @@ const configSchema = z.object({
+     ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY'] as const,
+     ['META_APP_ID', 'META_APP_SECRET'] as const,
+     ['GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY'] as const,
++    ['ASC_KEY_ID', 'ASC_ISSUER_ID', 'ASC_PRIVATE_KEY'] as const,
+   ]) {
+     const count = group.filter((name) => config[name] !== undefined).length;
+     if (count > 0 && count < group.length) {
+diff --git a/src/services/account-deletion.ts b/src/services/account-deletion.ts
+index d2520c8..9fa350a 100644
+--- a/src/services/account-deletion.ts
++++ b/src/services/account-deletion.ts
+@@ -28,6 +28,8 @@ export type AccountDeletionDependencies = {
+   hearken?: HearkenService | undefined;
+   budgetGroups?: Pick<BudgetGroupsService, 'purgeUser'> | undefined;
+   reports?: ReportStore | undefined;
++  /** Ends an affiliate's own sign-in (their credit and payouts are the team's records and stay). */
++  affiliates?: { forgetUser: (userId: string) => Promise<void> } | undefined;
+ };
+ 
+ // Set by createApp. The BigTable handlers are plain functions without the app's dependencies,
+@@ -203,6 +205,14 @@ export async function deleteHearthAccount(userId: string, options: DeleteAccount
+     }
+   }
+ 
++  if (dependencies.affiliates) {
++    try {
++      await dependencies.affiliates.forgetUser(userId);
++    } catch (error) {
++      throw new AccountDeletionError('affiliate cleanup', 'Failed to delete account', error);
++    }
++  }
++
+   // 4. Suffice: group budgets the person owns are erased for everyone; elsewhere they leave, taking
+   // their expenses and settlements. Then the banks connected through Plaid.
+   if (dependencies.budgetGroups) {
+diff --git a/src/studio/gate.ts b/src/studio/gate.ts
+index d17a673..4f3550f 100644
+--- a/src/studio/gate.ts
++++ b/src/studio/gate.ts
+@@ -36,6 +36,7 @@ const what: Record<Permission, string> = {
+   post: 'post and reply',
+   plans: 'grant plans',
+   accounts: 'connect social accounts',
++  affiliates: 'manage affiliates and payouts',
+   owner: 'manage the team',
+ };
+ 
+diff --git a/src/studio/routes.ts b/src/studio/routes.ts
+index 5b4cb30..f5e7a15 100644
+--- a/src/studio/routes.ts
++++ b/src/studio/routes.ts
+@@ -54,7 +54,7 @@ const ok = { ok: true as const };
+ 
+ const memberView = (member: Member) => ({
+   userId: member.userId, role: member.role, displayName: member.displayName,
+-  permissions: { post: member.role === 'owner' || member.canPost, plans: member.role === 'owner' || member.canPlans, accounts: member.role === 'owner' || member.canAccounts },
++  permissions: { post: member.role === 'owner' || member.canPost, plans: member.role === 'owner' || member.canPlans, accounts: member.role === 'owner' || member.canAccounts, affiliates: member.role === 'owner' || member.canAffiliates },
+   notifications: { due: member.notifyDue, comments: member.notifyComments, failed: member.notifyFailed },
+   addedAt: member.addedAt,
+ });
+@@ -148,13 +148,13 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
+     method: 'patch', path: '/v1/studio/members/{userId}', summary: 'What a member can do (owners only)',
+     request: {
+       params: z.object({ userId: uuid.openapi({ param: { name: 'userId', in: 'path' } }) }),
+-      ...body(z.object({ post: z.boolean().optional(), plans: z.boolean().optional(), accounts: z.boolean().optional() }).strict()),
++      ...body(z.object({ post: z.boolean().optional(), plans: z.boolean().optional(), accounts: z.boolean().optional(), affiliates: z.boolean().optional() }).strict()),
+     },
+     responses: { 200: anyJson('Member'), ...errors },
+   }), async (context) => {
+     const owner = need(context, 'owner');
+     const input = context.req.valid('json');
+-    const updated = await team().updateMember(owner.teamId, context.req.valid('param').userId, defined({ canPost: input.post, canPlans: input.plans, canAccounts: input.accounts }));
++    const updated = await team().updateMember(owner.teamId, context.req.valid('param').userId, defined({ canPost: input.post, canPlans: input.plans, canAccounts: input.accounts, canAffiliates: input.affiliates }));
+     return context.json(await view(updated), 200);
+   });
+ 
+@@ -170,12 +170,12 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
+ 
+   app.openapi(route('Studio team', {
+     method: 'post', path: '/v1/studio/invites', summary: 'An invite code for someone to join the team (owners only; a week, one use)',
+-    request: body(z.object({ post: z.boolean().default(true), plans: z.boolean().default(false), accounts: z.boolean().default(false) }).strict()),
++    request: body(z.object({ post: z.boolean().default(true), plans: z.boolean().default(false), accounts: z.boolean().default(false), affiliates: z.boolean().default(false) }).strict()),
+     responses: { 200: anyJson('Invite'), ...errors },
+   }), async (context) => {
+     const owner = need(context, 'owner');
+     const input = context.req.valid('json');
+-    return context.json(await team().createInvite(owner.teamId, owner.userId, { canPost: input.post, canPlans: input.plans, canAccounts: input.accounts }), 200);
++    return context.json(await team().createInvite(owner.teamId, owner.userId, { canPost: input.post, canPlans: input.plans, canAccounts: input.accounts, canAffiliates: input.affiliates }), 200);
+   });
+ 
+   app.openapi(route('Studio team', {
+diff --git a/src/studio/team.ts b/src/studio/team.ts
+index 8819210..59e7a80 100644
+--- a/src/studio/team.ts
++++ b/src/studio/team.ts
+@@ -10,7 +10,7 @@ import { isUniqueViolation, newInviteCode } from '../hearken/service.js';
+  * sees one of them, so there's nothing to set up by hand.
+  */
+ 
+-export type Permission = 'post' | 'plans' | 'accounts' | 'owner';
++export type Permission = 'post' | 'plans' | 'accounts' | 'affiliates' | 'owner';
+ 
+ export type Member = {
+   teamId: string;
+@@ -20,6 +20,8 @@ export type Member = {
+   canPost: boolean;
+   canPlans: boolean;
+   canAccounts: boolean;
++  /** See amounts owed, change affiliates' terms and mark payouts. */
++  canAffiliates: boolean;
+   displayName: string | null;
+   /** The profile photo's path in the library bucket. */
+   avatarPath: string | null;
+@@ -32,6 +34,7 @@ export type Member = {
+ export function can(member: Member, permission: Permission): boolean {
+   if (member.role === 'owner') return true;
+   if (permission === 'owner') return false;
++  if (permission === 'affiliates') return member.canAffiliates;
+   return permission === 'post' ? member.canPost : permission === 'plans' ? member.canPlans : member.canAccounts;
+ }
+ 
+@@ -40,7 +43,7 @@ const iso = (value: unknown) => (value instanceof Date ? value.toISOString() : S
+ function member(row: Record<string, unknown>): Member {
+   return {
+     teamId: String(row.team_id), teamName: String(row.team_name ?? ''), userId: String(row.user_id),
+-    role: row.role as Member['role'], canPost: row.can_post === true, canPlans: row.can_plans === true, canAccounts: row.can_accounts === true,
++    role: row.role as Member['role'], canPost: row.can_post === true, canPlans: row.can_plans === true, canAccounts: row.can_accounts === true, canAffiliates: row.can_affiliates === true,
+     displayName: (row.display_name as string | null) ?? null,
+     avatarPath: (row.avatar_path as string | null) ?? null,
+     notifyDue: row.notify_due !== false, notifyComments: row.notify_comments !== false, notifyFailed: row.notify_failed !== false,
+@@ -103,12 +106,13 @@ export function createTeamService(sql: Sql, options: { ownerIds: string[]; now?:
+       return row ? { id: String(row.id), slug: String(row.slug), name: String(row.name), keepRuns: Number(row.keep_runs) } : undefined;
+     },
+ 
+-    async updateMember(teamId: string, userId: string, patch: { canPost?: boolean; canPlans?: boolean; canAccounts?: boolean; displayName?: string | null }) {
++    async updateMember(teamId: string, userId: string, patch: { canPost?: boolean; canPlans?: boolean; canAccounts?: boolean; canAffiliates?: boolean; displayName?: string | null }) {
+       const [row] = await sql`
+         update studio_members set
+           can_post = coalesce(${patch.canPost ?? null}, can_post),
+           can_plans = coalesce(${patch.canPlans ?? null}, can_plans),
+           can_accounts = coalesce(${patch.canAccounts ?? null}, can_accounts),
++          can_affiliates = coalesce(${patch.canAffiliates ?? null}, can_affiliates),
+           display_name = case when ${patch.displayName !== undefined} then ${patch.displayName ?? null} else display_name end
+         where team_id = ${teamId} and user_id = ${userId}
+         returning *`;
+@@ -135,14 +139,14 @@ export function createTeamService(sql: Sql, options: { ownerIds: string[]; now?:
+         where team_id = ${teamId} and user_id = ${userId}`;
+     },
+ 
+-    async createInvite(teamId: string, by: string, permissions: { canPost: boolean; canPlans: boolean; canAccounts: boolean }) {
++    async createInvite(teamId: string, by: string, permissions: { canPost: boolean; canPlans: boolean; canAccounts: boolean; canAffiliates?: boolean }) {
+       const expiresAt = new Date(now() + 7 * 86_400_000);
+       for (let attempt = 0; attempt < 5; attempt += 1) {
+         const code = newInviteCode();
+         try {
+           await sql`
+-            insert into studio_invites (code, team_id, can_post, can_plans, can_accounts, created_by, expires_at)
+-            values (${code}, ${teamId}, ${permissions.canPost}, ${permissions.canPlans}, ${permissions.canAccounts}, ${by}, ${expiresAt})`;
++            insert into studio_invites (code, team_id, can_post, can_plans, can_accounts, can_affiliates, created_by, expires_at)
++            values (${code}, ${teamId}, ${permissions.canPost}, ${permissions.canPlans}, ${permissions.canAccounts}, ${permissions.canAffiliates ?? false}, ${by}, ${expiresAt})`;
+           return { code, expiresAt: expiresAt.toISOString() };
+         } catch (error) {
+           if (!isUniqueViolation(error)) throw error;
+@@ -157,12 +161,13 @@ export function createTeamService(sql: Sql, options: { ownerIds: string[]; now?:
+           select * from studio_invites where code = ${code.toUpperCase()} and used_at is null and expires_at > ${new Date(now())} for update`;
+         if (!invite) throw new ApiError(404, 'INVITE_NOT_FOUND', 'That invite is used, expired or doesn’t exist. Ask for a new one.');
+         await tx`
+-          insert into studio_members (team_id, user_id, role, can_post, can_plans, can_accounts, display_name, added_by)
+-          values (${invite.team_id}, ${userId}, 'member', ${invite.can_post}, ${invite.can_plans}, ${invite.can_accounts}, ${displayName}, ${invite.created_by})
++          insert into studio_members (team_id, user_id, role, can_post, can_plans, can_accounts, can_affiliates, display_name, added_by)
++          values (${invite.team_id}, ${userId}, 'member', ${invite.can_post}, ${invite.can_plans}, ${invite.can_accounts}, ${invite.can_affiliates === true}, ${displayName}, ${invite.created_by})
+           on conflict (team_id, user_id) do update set
+             can_post = studio_members.can_post or excluded.can_post,
+             can_plans = studio_members.can_plans or excluded.can_plans,
+-            can_accounts = studio_members.can_accounts or excluded.can_accounts`;
++            can_accounts = studio_members.can_accounts or excluded.can_accounts,
++            can_affiliates = studio_members.can_affiliates or excluded.can_affiliates`;
+         await tx`update studio_invites set used_by = ${userId}, used_at = now() where code = ${invite.code}`;
+         return String(invite.team_id);
+       }) as Promise<string>;
+diff --git a/supabase/migrations/20261029200000_affiliates_and_links.sql b/supabase/migrations/20261029200000_affiliates_and_links.sql
+new file mode 100644
+index 0000000..3978a5f
+--- /dev/null
++++ b/supabase/migrations/20261029200000_affiliates_and_links.sql
+@@ -0,0 +1,199 @@
++-- Hearth Studio: affiliates, their codes and exact credit, campaign links and their numbers.
++--
++-- Affiliates are paid only from credits: one row per purchase, renewal or refund that RevenueCat
++-- reported with an affiliate's code (an App Store offer code, or a referral code the app saved
++-- to the customer). Credits are never edited; a refund or a correction is a new row. A payout
++-- covers the unpaid credits up to a date.
++--
++-- No people: an attribution is keyed on an HMAC of the store's original transaction id, enough to
++-- credit renewals and refunds of that subscription and nothing more. Affiliates and the team see
++-- the plan, date and amount only.
++--
++-- Campaign links (an App Store link's ct= code, maybe behind hearthapps.com/go/<slug>) are for
++-- reporting: App Store Connect totals and short-link tap counts. They never create money owed.
++--
++-- Like the other API-only tables: row-level security on, no policies, no grants to app roles.
++
++begin;
++
++-- Who may see amounts owed, change terms and mark payouts (owners always can).
++alter table public.studio_members add column if not exists can_affiliates boolean not null default false;
++alter table public.studio_invites add column if not exists can_affiliates boolean not null default false;
++
++create table public.affiliates (
++  id uuid primary key default gen_random_uuid(),
++  team_id uuid not null references public.studio_teams (id) on delete cascade,
++  name text not null check (char_length(name) between 1 and 80),
++  -- How to reach them for payment (an email, a handle): never shown to anyone but the team.
++  contact text check (char_length(contact) <= 200),
++  -- Either a share of Apple's proceeds in basis points, or a flat amount per paying subscription.
++  rate_bps integer check (rate_bps between 0 and 10000),
++  flat_cents integer check (flat_cents between 0 and 1000000),
++  -- How long a subscription earns credit after its first purchase.
++  window_months integer not null default 12 check (window_months between 1 and 120),
++  active boolean not null default true,
++  -- The affiliate's own sign-in, once they've joined with an invite (they see only their own).
++  user_id uuid unique,
++  created_at timestamptz not null default now(),
++  updated_at timestamptz not null default now(),
++  check ((rate_bps is null) <> (flat_cents is null))
++);
++create index affiliates_team on public.affiliates (team_id);
++
++create table public.affiliate_codes (
++  id uuid primary key default gen_random_uuid(),
++  team_id uuid not null references public.studio_teams (id) on delete cascade,
++  affiliate_id uuid not null references public.affiliates (id) on delete cascade,
++  -- The Hearth app it's for (its key).
++  app text not null check (app ~ '^[a-z0-9-]{1,40}$'),
++  -- What the subscriber types (KRISTEN20), kept upper case.
++  code text not null check (code ~ '^[A-Z0-9_-]{3,40}$'),
++  kind text not null check (kind in ('apple_offer', 'referral')),
++  -- For an App Store offer code: the offer's reference name, which purchases may report instead of the code.
++  offer_ref text check (char_length(offer_ref) <= 100),
++  active boolean not null default true,
++  created_at timestamptz not null default now()
++);
++create unique index affiliate_codes_code on public.affiliate_codes (team_id, code);
++
++create table public.affiliate_invites (
++  code text primary key check (code ~ '^[A-Z2-9]{8}$'),
++  team_id uuid not null references public.studio_teams (id) on delete cascade,
++  affiliate_id uuid not null references public.affiliates (id) on delete cascade,
++  created_by uuid not null,
++  created_at timestamptz not null default now(),
++  expires_at timestamptz not null,
++  used_by uuid,
++  used_at timestamptz
++);
++
++-- A subscription credited to an affiliate: its first code wins, for window_months.
++create table public.affiliate_attributions (
++  id uuid primary key default gen_random_uuid(),
++  team_id uuid not null references public.studio_teams (id) on delete cascade,
++  affiliate_id uuid not null references public.affiliates (id) on delete cascade,
++  code_id uuid not null references public.affiliate_codes (id) on delete cascade,
++  app text not null,
++  -- HMAC-SHA256 of the store and original transaction id, with the server's secret.
++  subscription_key text not null check (subscription_key ~ '^[0-9a-f]{64}$'),
++  started_at timestamptz not null,
++  ends_at timestamptz not null,
++  -- A flat-rate affiliate is paid once per subscription: set when that credit is made.
++  flat_paid boolean not null default false,
++  created_at timestamptz not null default now()
++);
++create unique index affiliate_attributions_key on public.affiliate_attributions (team_id, subscription_key);
++
++create table public.affiliate_payouts (
++  id uuid primary key default gen_random_uuid(),
++  team_id uuid not null references public.studio_teams (id) on delete cascade,
++  affiliate_id uuid not null references public.affiliates (id) on delete cascade,
++  -- Every unpaid credit up to the end of this day (UTC).
++  through date not null,
++  total_cents integer not null,
++  paid_by uuid not null,
++  note text check (char_length(note) <= 300),
++  paid_at timestamptz not null default now()
++);
++create index affiliate_payouts_affiliate on public.affiliate_payouts (affiliate_id, paid_at desc);
++
++create table public.affiliate_credits (
++  id uuid primary key default gen_random_uuid(),
++  team_id uuid not null references public.studio_teams (id) on delete cascade,
++  affiliate_id uuid not null references public.affiliates (id) on delete cascade,
++  attribution_id uuid references public.affiliate_attributions (id) on delete set null,
++  -- The RevenueCat event that made it: a replayed webhook makes nothing new.
++  event_id text not null unique,
++  -- HMAC of the store transaction, so a refund finds the purchase it undoes.
++  transaction_key text check (transaction_key ~ '^[0-9a-f]{64}$'),
++  app text not null,
++  product text not null check (char_length(product) <= 200),
++  kind text not null check (kind in ('purchase', 'renewal', 'refund', 'adjustment')),
++  proceeds_cents integer not null,
++  commission_cents integer not null,
++  occurred_at timestamptz not null,
++  payout_id uuid references public.affiliate_payouts (id) on delete set null,
++  note text check (char_length(note) <= 300),
++  created_at timestamptz not null default now()
++);
++create index affiliate_credits_affiliate on public.affiliate_credits (affiliate_id, occurred_at desc);
++create index affiliate_credits_unpaid on public.affiliate_credits (affiliate_id) where payout_id is null;
++create index affiliate_credits_transaction on public.affiliate_credits (transaction_key);
++
++-- What the monthly reconciliation found that needs a look before paying.
++create table public.affiliate_flags (
++  id uuid primary key default gen_random_uuid(),
++  team_id uuid not null references public.studio_teams (id) on delete cascade,
++  affiliate_id uuid references public.affiliates (id) on delete cascade,
++  kind text not null check (kind in ('missing_credit', 'unknown_code', 'refund_without_purchase')),
++  detail text not null check (char_length(detail) <= 500),
++  event_id text,
++  created_at timestamptz not null default now(),
++  resolved_at timestamptz,
++  resolved_by uuid
++);
++create unique index affiliate_flags_event on public.affiliate_flags (kind, event_id) where event_id is not null;
++
++create table public.campaign_links (
++  id uuid primary key default gen_random_uuid(),
++  team_id uuid not null references public.studio_teams (id) on delete cascade,
++  app text not null check (app ~ '^[a-z0-9-]{1,40}$'),
++  name text not null check (char_length(name) between 1 and 80),
++  -- App Store Connect's campaign token: what the totals are reported under.
++  ct text not null check (ct ~ '^[A-Za-z0-9._-]{1,40}$'),
++  app_store_id text not null check (app_store_id ~ '^\d{5,15}$'),
++  -- hearthapps.com/go/<slug>, when the link has a short form.
++  slug text unique check (slug ~ '^[a-z0-9-]{2,60}$'),
++  affiliate_id uuid references public.affiliates (id) on delete set null,
++  created_by uuid not null,
++  created_at timestamptz not null default now(),
++  deleted_at timestamptz
++);
++create unique index campaign_links_ct on public.campaign_links (team_id, app, ct) where deleted_at is null;
++
++-- Short-link taps: a count per link per day, nothing about who tapped.
++create table public.link_taps_daily (
++  link_id uuid not null references public.campaign_links (id) on delete cascade,
++  day date not null,
++  taps integer not null default 0,
++  primary key (link_id, day)
++);
++
++-- App Store Connect's campaign totals per app, ct and day.
++create table public.campaign_stats_daily (
++  team_id uuid not null references public.studio_teams (id) on delete cascade,
++  app text not null,
++  ct text not null,
++  day date not null,
++  metric text not null check (metric in ('page_views', 'downloads', 'redownloads', 'proceeds_cents', 'paying_users')),
++  value numeric not null,
++  primary key (team_id, app, ct, day, metric)
++);
++
++-- The ongoing App Store Connect analytics report request for each app.
++create table public.asc_report_requests (
++  app_store_id text primary key,
++  request_id text not null,
++  imported_through date,
++  created_at timestamptz not null default now()
++);
++
++do $$
++declare
++  t text;
++begin
++  foreach t in array array['affiliates', 'affiliate_codes', 'affiliate_invites', 'affiliate_attributions', 'affiliate_payouts',
++                           'affiliate_credits', 'affiliate_flags', 'campaign_links', 'link_taps_daily', 'campaign_stats_daily',
++                           'asc_report_requests'] loop
++    execute format('alter table public.%I enable row level security', t);
++    if exists (select 1 from pg_roles where rolname = 'anon') then
++      execute format('revoke all on public.%I from anon', t);
++    end if;
++    if exists (select 1 from pg_roles where rolname = 'authenticated') then
++      execute format('revoke all on public.%I from authenticated', t);
++    end if;
++  end loop;
++end
++$$;
++
++commit;
+diff --git a/tests/studio/affiliates.test.ts b/tests/studio/affiliates.test.ts
+new file mode 100644
+index 0000000..49281fc
+--- /dev/null
++++ b/tests/studio/affiliates.test.ts
+@@ -0,0 +1,280 @@
++import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
++import postgres from 'postgres';
++import { createApp } from '../../src/app.js';
++import { readConfig } from '../../src/config.js';
++import { parseCampaignReport } from '../../src/affiliates/asc.js';
++import { addMonths, commissionCents, monthRange, proceedsCents, readPurchaseEvent } from '../../src/affiliates/credit.js';
++import { creditAffiliateEvent } from '../../src/affiliates/hook.js';
++import { createLinkService } from '../../src/affiliates/links.js';
++import { createAffiliateService } from '../../src/affiliates/service.js';
++import type { AffiliateService } from '../../src/affiliates/service.js';
++import { createTeamService } from '../../src/studio/team.js';
++import { migrate, reset } from './database.js';
++
++describe('affiliate money math', () => {
++  it('works out proceeds and commission to the cent', () => {
++    expect(proceedsCents(39.99, 0.85)).toBe(3399);
++    expect(proceedsCents(-39.99, 0.85)).toBe(0);
++    expect(proceedsCents(0, 0.85)).toBe(0);
++    // 20% of $33.99 is $6.798: half up to the cent is $6.80.
++    expect(commissionCents(3399, { rateBps: 2000, flatCents: null }, false)).toBe(680);
++    // 15% of $0.25 is 3.75 cents → 4.
++    expect(commissionCents(25, { rateBps: 1500, flatCents: null }, false)).toBe(4);
++    expect(commissionCents(3399, { rateBps: null, flatCents: 500 }, false)).toBe(500);
++    expect(commissionCents(3399, { rateBps: null, flatCents: 500 }, true)).toBe(0);
++  });
++
++  it('adds months without running into the next one', () => {
++    expect(addMonths(new Date('2026-01-31T10:00:00Z'), 1).toISOString()).toBe('2026-02-28T10:00:00.000Z');
++    expect(addMonths(new Date('2026-10-15T00:00:00Z'), 12).toISOString()).toBe('2027-10-15T00:00:00.000Z');
++    expect(monthRange('2026-12')).toEqual({ start: new Date('2026-12-01T00:00:00Z'), end: new Date('2027-01-01T00:00:00Z') });
++  });
++
++  it('reads purchases and refunds from RevenueCat events', () => {
++    const purchase = readPurchaseEvent({ event: {
++      id: 'e1', type: 'INITIAL_PURCHASE', environment: 'PRODUCTION', store: 'APP_STORE', product_id: 'sated_plus_annual',
++      price: 39.99, takehome_percentage: 0.85, offer_code: 'kristen20', original_transaction_id: '1000', transaction_id: '1000', purchased_at_ms: 1_780_000_000_000,
++    } })!;
++    expect(purchase).toMatchObject({ type: 'INITIAL_PURCHASE', offerCode: 'kristen20', priceUsd: 39.99, takehome: 0.85 });
++    expect(readPurchaseEvent({ event: { id: 'e2', type: 'CANCELLATION', cancel_reason: 'UNSUBSCRIBE' } })).toBeNull();
++    expect(readPurchaseEvent({ event: { id: 'e3', type: 'CANCELLATION', cancel_reason: 'CUSTOMER_SUPPORT', event_timestamp_ms: 5 } })!.occurredAt.getTime()).toBe(5);
++    expect(readPurchaseEvent({ event: { id: 'e4', type: 'BILLING_ISSUE' } })).toBeNull();
++  });
++
++  it('reads App Store Connect campaign reports by header', () => {
++    const downloads = 'Date\tApp Name\tDownload Type\tCampaign\tCounts\n2026-10-20\tSated\tFirst-time download\tkristen-ig\t5\n'
++      + '2026-10-20\tSated\tRedownload\tkristen-ig\t2\n2026-10-20\tSated\tFirst-time download\tkristen-ig\t3\n2026-10-20\tSated\tFirst-time download\t\t40\n';
++    expect(parseCampaignReport(downloads)).toEqual([
++      { ct: 'kristen-ig', day: '2026-10-20', metric: 'downloads', value: 8 },
++      { ct: 'kristen-ig', day: '2026-10-20', metric: 'redownloads', value: 2 },
++    ]);
++    const engagement = 'Date\tEvent\tCampaign\tCounts\n2026-10-21\tPage view\tkristen-ig\t31\n2026-10-21\tImpression\tkristen-ig\t400\n';
++    expect(parseCampaignReport(engagement)).toEqual([{ ct: 'kristen-ig', day: '2026-10-21', metric: 'page_views', value: 31 }]);
++  });
++});
++
++// Against a real Postgres: set SOCIAL_TEST_DATABASE_URL (or HEARKEN_TEST_DATABASE_URL) to an empty scratch database.
++const url = process.env.SOCIAL_TEST_DATABASE_URL ?? process.env.HEARKEN_TEST_DATABASE_URL;
++
++const steve = '00000000-0000-4000-8000-0000000000aa';
++const kristen = '00000000-0000-4000-8000-0000000000cc';
++const helper = '00000000-0000-4000-8000-0000000000ee';
++const stranger = '00000000-0000-4000-8000-0000000000bb';
++const users: Record<string, string> = { steve, kristen, helper, stranger };
++const day = 86_400_000;
++
++let serial = 0;
++function event(fields: Record<string, unknown>) {
++  serial += 1;
++  return { api_version: '1.0', event: {
++    id: `evt-${serial}`, environment: 'PRODUCTION', store: 'APP_STORE', product_id: 'sated_plus_annual', takehome_percentage: 0.85,
++    app_user_id: 'someone', ...fields,
++  } };
++}
++
++describe.skipIf(!url)('affiliates (Postgres)', () => {
++  let sql: postgres.Sql;
++  let release: (() => Promise<void>) | undefined;
++  let app: ReturnType<typeof createApp>;
++  let service: AffiliateService;
++  let teamId: string;
++
++  beforeAll(async () => {
++    sql = postgres(url!, { max: 4, onnotice: () => undefined });
++    release = await migrate(sql);
++    teamId = String((await sql`select id from studio_teams where slug = 'hearth'`)[0]!.id);
++  });
++  afterAll(async () => { await release?.(); await sql?.end(); });
++
++  beforeEach(async () => {
++    await reset(sql);
++    service = createAffiliateService(sql, { secret: Buffer.alloc(32, 3) });
++    app = createApp({
++      config: readConfig({ SOCIAL_OWNER_IDS: steve, SOCIAL_TOKEN_KEY: Buffer.alloc(32, 7).toString('base64'), ASC_PROVIDER_ID: '118000' }),
++      verifyToken: async (bearer) => ({ userId: users[bearer] ?? stranger, isAnonymous: bearer === 'anonymous' }),
++      reserveQuota: async () => undefined,
++      entitlements: async () => [],
++      studio: { team: createTeamService(sql, { ownerIds: [steve] }), sql },
++      affiliates: { service, links: createLinkService(sql, { providerId: '118000', shortBase: 'https://hearthapps.com/go' }) },
++    });
++  });
++
++  const call = async (who: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => {
++    const response = await app.request(path, {
++      method,
++      headers: { Authorization: `Bearer ${who}`, ...headers, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
++      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
++    });
++    const text = await response.text();
++    const json = response.headers.get('content-type')?.includes('json');
++    return { status: response.status, body: text && json ? JSON.parse(text) : text, headers: response.headers };
++  };
++
++  async function kristenOnSated(terms: Record<string, unknown> = { rateBps: 2000 }) {
++    await call('steve', 'GET', '/v1/studio/me');
++    const created = await call('steve', 'POST', '/v1/studio/affiliates', { name: 'Kristen', contact: 'kristen@example.com', ...terms });
++    expect(created.status).toBe(200);
++    const id = String(created.body.id);
++    expect((await call('steve', 'POST', `/v1/studio/affiliates/${id}/codes`, { app: 'sated', code: 'kristen20', kind: 'apple_offer' })).status).toBe(200);
++    return id;
++  }
++
++  it('credits coded purchases exactly once, renewals in the window, and claws back refunds', async () => {
++    const id = await kristenOnSated();
++    const bought = Date.now() - 20 * day;
++    const first = event({ type: 'INITIAL_PURCHASE', price: 39.99, offer_code: 'KRISTEN20', original_transaction_id: '2000', transaction_id: '2000', purchased_at_ms: bought });
++    expect(await creditAffiliateEvent(first)).toEqual({ outcome: 'credited', affiliateId: id, commissionCents: 680 });
++    // RevenueCat retries: nothing new.
++    expect(await creditAffiliateEvent(first)).toEqual({ outcome: 'duplicate' });
++
++    // A renewal carries no code; the subscription remembers.
++    const renewal = event({ type: 'RENEWAL', price: 39.99, original_transaction_id: '2000', transaction_id: '2001', purchased_at_ms: bought + 10 * day });
++    expect(await creditAffiliateEvent(renewal)).toMatchObject({ outcome: 'credited', commissionCents: 680 });
++    // After the 12-month window: no credit.
++    const late = event({ type: 'RENEWAL', price: 39.99, original_transaction_id: '2000', transaction_id: '2002', purchased_at_ms: bought + 400 * day });
++    expect(await creditAffiliateEvent(late)).toMatchObject({ outcome: 'ignored', reason: 'outside the credit window' });
++
++    // Not hers, sandbox, and a code nobody has.
++    expect(await creditAffiliateEvent(event({ type: 'INITIAL_PURCHASE', price: 39.99, original_transaction_id: '3000', transaction_id: '3000', purchased_at_ms: bought })))
++      .toMatchObject({ outcome: 'ignored', reason: 'no code' });
++    expect(await creditAffiliateEvent(event({ type: 'INITIAL_PURCHASE', environment: 'SANDBOX', price: 39.99, offer_code: 'KRISTEN20', original_transaction_id: '4000', purchased_at_ms: bought })))
++      .toMatchObject({ outcome: 'ignored', reason: 'sandbox' });
++    expect(await creditAffiliateEvent(event({ type: 'INITIAL_PURCHASE', price: 39.99, offer_code: 'NOPE99', original_transaction_id: '5000', purchased_at_ms: bought })))
++      .toEqual({ outcome: 'unknown_code', code: 'NOPE99' });
++
++    // A refund of the renewal takes its commission back.
++    const refund = event({ type: 'CANCELLATION', cancel_reason: 'CUSTOMER_SUPPORT', price: -39.99, original_transaction_id: '2000', transaction_id: '2001',
++      purchased_at_ms: bought + 10 * day, event_timestamp_ms: Date.now() - day });
++    expect(await creditAffiliateEvent(refund)).toMatchObject({ outcome: 'refunded', commissionCents: -680 });
++    expect(await creditAffiliateEvent({ event: { ...refund.event, id: 'evt-refund-again' } })).toEqual({ outcome: 'duplicate' });
++
++    const detail = await call('steve', 'GET', `/v1/studio/affiliates/${id}`);
++    expect(detail.body.affiliate.owedCents).toBe(680);
++    expect(detail.body.credits.map((entry: { kind: string; commissionCents: number }) => [entry.kind, entry.commissionCents]))
++      .toEqual([['refund', -680], ['renewal', 680], ['purchase', 680]]);
++    // No transaction ids or people anywhere in what's stored.
++    const stored = await sql`select * from affiliate_credits`;
++    expect(JSON.stringify(stored)).not.toMatch(/"2000"|"2001"|someone/);
++  });
++
++  it('pays a flat amount once per subscriber, and a free trial only starts the attribution', async () => {
++    const id = await kristenOnSated({ flatCents: 500 });
++    const start = Date.now() - 30 * day;
++    expect(await creditAffiliateEvent(event({ type: 'INITIAL_PURCHASE', price: 0, offer_code: 'KRISTEN20', original_transaction_id: '6000', transaction_id: '6000', purchased_at_ms: start })))
++      .toEqual({ outcome: 'attributed', affiliateId: id });
++    expect(await creditAffiliateEvent(event({ type: 'RENEWAL', price: 39.99, original_transaction_id: '6000', transaction_id: '6001', purchased_at_ms: start + 7 * day })))
++      .toMatchObject({ outcome: 'credited', commissionCents: 500 });
++    expect(await creditAffiliateEvent(event({ type: 'RENEWAL', price: 39.99, original_transaction_id: '6000', transaction_id: '6002', purchased_at_ms: start + 20 * day })))
++      .toMatchObject({ outcome: 'credited', commissionCents: 0 });
++  });
++
++  it('records payouts, refuses paying nothing or with open flags, and carries a later refund over', async () => {
++    const id = await kristenOnSated();
++    const bought = Date.now() - 20 * day;
++    await creditAffiliateEvent(event({ type: 'INITIAL_PURCHASE', price: 39.99, offer_code: 'KRISTEN20', original_transaction_id: '7000', transaction_id: '7000', purchased_at_ms: bought }));
++    await creditAffiliateEvent(event({ type: 'INITIAL_PURCHASE', price: 9.99, offer_code: 'KRISTEN20', original_transaction_id: '7100', transaction_id: '7100', purchased_at_ms: bought }));
++    const today = new Date().toISOString().slice(0, 10);
++
++    // A refund matching nothing credited is flagged, and blocks paying.
++    await creditAffiliateEvent(event({ type: 'CANCELLATION', cancel_reason: 'CUSTOMER_SUPPORT', price: -9.99, original_transaction_id: '7100', transaction_id: '7199', event_timestamp_ms: Date.now() }));
++    const blocked = await call('steve', 'POST', `/v1/studio/affiliates/${id}/payouts`, { through: today });
++    expect(blocked.body.error.code).toBe('FLAGS_OPEN');
++    const flags = await call('steve', 'GET', '/v1/studio/affiliate-flags');
++    expect(flags.body.flags).toHaveLength(1);
++    await call('steve', 'POST', `/v1/studio/affiliate-flags/${flags.body.flags[0].id}/resolve`);
++
++    const paid = await call('steve', 'POST', `/v1/studio/affiliates/${id}/payouts`, { through: today, note: 'PayPal' });
++    // $6.80 + 20% of $8.49 ($1.698 → $1.70).
++    expect(paid.body).toMatchObject({ totalCents: 850, credits: 2 });
++    expect((await call('steve', 'POST', `/v1/studio/affiliates/${id}/payouts`, { through: today })).body.error.code).toBe('NOTHING_OWED');
++
++    // Refunded after being paid: owed goes negative and comes off the next payout.
++    await creditAffiliateEvent(event({ type: 'CANCELLATION', cancel_reason: 'CUSTOMER_SUPPORT', price: -39.99, original_transaction_id: '7000', transaction_id: '7000', event_timestamp_ms: Date.now() }));
++    expect((await call('steve', 'GET', `/v1/studio/affiliates/${id}`)).body.affiliate.owedCents).toBe(-680);
++
++    // Undoing the payout makes its credits owed again (owners only).
++    const statement = await call('steve', 'GET', `/v1/studio/affiliates/${id}/statement?month=${today.slice(0, 7)}`);
++    expect(statement.headers.get('content-type')).toContain('text/csv');
++    expect(String(statement.body).split('\n')[0]).toBe('Date,App,Plan,Kind,Proceeds (USD),Your share (USD),Paid');
++    expect(String(statement.body).trim().split('\n').at(-1)).toMatch(/^Total,,,,,-?\d+\.\d{2},$/);
++    expect((await call('steve', 'DELETE', `/v1/studio/affiliate-payouts/${paid.body.id}`)).status).toBe(200);
++    expect((await call('steve', 'GET', `/v1/studio/affiliates/${id}`)).body.affiliate.owedCents).toBe(170);
++  });
++
++  it('reconciles a month from stored webhook events, adding what a failed webhook missed', async () => {
++    const id = await kristenOnSated();
++    const month = new Date().toISOString().slice(0, 7);
++    const missed = event({ type: 'INITIAL_PURCHASE', price: 39.99, offer_code: 'KRISTEN20', original_transaction_id: '8000', transaction_id: '8000', purchased_at_ms: monthRange(month).start.getTime() + 1000 });
++    const stray = event({ type: 'INITIAL_PURCHASE', price: 39.99, offer_code: 'TYPO20', original_transaction_id: '8100', purchased_at_ms: monthRange(month).start.getTime() + 2000 });
++    const result = await service.reconcile(teamId, month, async () => [missed, stray]);
++    expect(result).toMatchObject({ checked: 2, added: 1, unknownCodes: 1, openFlags: 1 });
++    expect(await service.reconcile(teamId, month, async () => [missed, stray])).toMatchObject({ added: 0, openFlags: 1 });
++    expect((await service.get(teamId, id)).owedCents).toBe(680);
++  });
++
++  it('keeps money from members without the permission, and gives affiliates only their own', async () => {
++    const id = await kristenOnSated();
++    await creditAffiliateEvent(event({ type: 'INITIAL_PURCHASE', price: 39.99, offer_code: 'KRISTEN20', original_transaction_id: '9000', transaction_id: '9000', purchased_at_ms: Date.now() - day }));
++
++    // A team member who may post but not see affiliate money.
++    const teamInvite = await call('steve', 'POST', '/v1/studio/invites', { post: true });
++    await call('helper', 'POST', `/v1/studio/invites/${teamInvite.body.code}/join`, {});
++    const seen = await call('helper', 'GET', '/v1/studio/affiliates');
++    expect(seen.body.affiliates[0]).toMatchObject({ name: 'Kristen' });
++    expect(seen.body.affiliates[0].owedCents).toBeUndefined();
++    expect(seen.body.affiliates[0].contact).toBeUndefined();
++    expect((await call('helper', 'POST', `/v1/studio/affiliates/${id}/payouts`, { through: '2026-12-31' })).body.error.code).toBe('PERMISSION_REQUIRED');
++
++    // Kristen joins as an affiliate.
++    expect((await call('kristen', 'GET', '/v1/affiliate/me')).body.error.code).toBe('NOT_AN_AFFILIATE');
++    const invite = await call('steve', 'POST', `/v1/studio/affiliates/${id}/invite`);
++    expect(invite.body.code).toMatch(/^[A-Z2-9]{8}$/);
++    expect((await call('anonymous', 'POST', `/v1/affiliate/invites/${invite.body.code}/join`)).body.error.code).toBe('REGISTERED_IDENTITY_REQUIRED');
++    expect((await call('kristen', 'POST', `/v1/affiliate/invites/${invite.body.code}/join`)).status).toBe(200);
++    expect((await call('stranger', 'POST', `/v1/affiliate/invites/${invite.body.code}/join`)).body.error.code).toBe('INVITE_NOT_FOUND');
++
++    const me = await call('kristen', 'GET', '/v1/affiliate/me');
++    expect(me.body.affiliate).toMatchObject({ name: 'Kristen', owedCents: 680, joined: true });
++    expect(me.body.affiliate.contact).toBeUndefined();
++    expect(me.body.codes.map((entry: { code: string }) => entry.code)).toEqual(['KRISTEN20']);
++    expect(me.body.credits).toHaveLength(1);
++    // The team's side stays closed to her.
++    expect((await call('kristen', 'GET', '/v1/studio/affiliates')).body.error.code).toBe('NOT_ON_TEAM');
++    expect((await call('kristen', 'GET', `/v1/affiliate/me/statement?month=${new Date().toISOString().slice(0, 7)}`)).status).toBe(200);
++
++    // Access can be ended.
++    await call('steve', 'DELETE', `/v1/studio/affiliates/${id}/access`);
++    expect((await call('kristen', 'GET', '/v1/affiliate/me')).body.error.code).toBe('NOT_AN_AFFILIATE');
++  });
++
++  it('makes campaign links, follows short links and counts taps (not crawlers)', async () => {
++    const id = await kristenOnSated();
++    const made = await call('steve', 'POST', '/v1/studio/links', { app: 'sated', name: 'Kristen IG', appStoreId: '1234567890', affiliateId: id });
++    expect(made.status).toBe(200);
++    expect(made.body).toMatchObject({ ct: 'kristen-ig', slug: 'sated-kristen-ig', shortUrl: 'https://hearthapps.com/go/sated-kristen-ig',
++      url: 'https://apps.apple.com/app/id1234567890?pt=118000&ct=kristen-ig&mt=8' });
++    expect((await call('steve', 'POST', '/v1/studio/links', { app: 'sated', name: 'Kristen IG', appStoreId: '1234567890' })).body.error.code).toBe('LINK_TAKEN');
++
++    const phone = { 'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148' };
++    const tap = await app.request('/go/sated-kristen-ig', { headers: phone });
++    expect(tap.status).toBe(302);
++    expect(tap.headers.get('location')).toBe(made.body.url);
++    await app.request('/go/sated-kristen-ig', { headers: phone });
++    await app.request('/go/sated-kristen-ig', { headers: { 'user-agent': 'facebookexternalhit/1.1' } });
++    expect((await app.request('/go/nothing-here')).status).toBe(404);
++
++    const today = new Date().toISOString().slice(0, 10);
++    await createLinkService(sql, { shortBase: 'https://x' }).recordStats(teamId, 'sated', [{ ct: 'kristen-ig', day: today, metric: 'downloads', value: 4 }]);
++    const list = await call('steve', 'GET', '/v1/studio/links?app=sated');
++    expect(list.body.links[0].totals).toMatchObject({ taps: 2, downloads: 4 });
++    const campaigns = await call('steve', 'GET', '/v1/studio/appstore/sated/campaigns');
++    expect(campaigns.body).toMatchObject({ updatedThrough: today, totals: { downloads: 4 }, campaigns: [{ ct: 'kristen-ig', name: 'Kristen IG' }] });
++    // Her links show on her own page too.
++    const invite = await call('steve', 'POST', `/v1/studio/affiliates/${id}/invite`);
++    await call('kristen', 'POST', `/v1/affiliate/invites/${invite.body.code}/join`);
++    expect((await call('kristen', 'GET', '/v1/affiliate/me')).body.links[0]).toMatchObject({ name: 'Kristen IG', totals: { taps: 2 } });
++
++    await call('steve', 'DELETE', `/v1/studio/links/${made.body.id}`);
++    expect((await app.request('/go/sated-kristen-ig', { headers: phone })).status).toBe(404);
++  });
++});
+diff --git a/tests/studio/database.ts b/tests/studio/database.ts
+index 0f74ecc..39c1928 100644
+--- a/tests/studio/database.ts
++++ b/tests/studio/database.ts
+@@ -9,9 +9,12 @@ export const STUDIO_MIGRATIONS = [
+   '20261029100100_studio_library.sql',
+   '20261029120000_library_one_version.sql',
+   '20261029180000_studio_member_avatars.sql',
++  '20261029200000_affiliates_and_links.sql',
+ ];
+ 
+ export const STUDIO_TABLES = [
++  'asc_report_requests', 'campaign_stats_daily', 'link_taps_daily', 'campaign_links', 'affiliate_flags', 'affiliate_credits',
++  'affiliate_payouts', 'affiliate_attributions', 'affiliate_invites', 'affiliate_codes', 'affiliates',
+   'library_assets', 'library_runs', 'marketing_campaigns', 'store_designs',
+   'social_metrics', 'social_comments', 'social_targets', 'social_posts', 'social_connections',
+   'studio_devices', 'plan_grants_log', 'studio_invites', 'studio_members', 'studio_teams',
+diff --git a/tests/studio/studio.test.ts b/tests/studio/studio.test.ts
+index d45b00b..f9df2e6 100644
+--- a/tests/studio/studio.test.ts
++++ b/tests/studio/studio.test.ts
+@@ -128,7 +128,7 @@ describe.skipIf(!url)('Hearth Studio (Postgres)', () => {
+     const members = await call('kristen', 'GET', '/v1/studio/members');
+     expect(members.body.members.map((member: { userId: string }) => member.userId)).toEqual([steve, kristen]);
+     const changed = await call('steve', 'PATCH', `/v1/studio/members/${kristen}`, { accounts: true });
+-    expect(changed.body.permissions).toEqual({ post: true, plans: true, accounts: true });
++    expect(changed.body.permissions).toEqual({ post: true, plans: true, accounts: true, affiliates: false });
+     expect((await call('steve', 'DELETE', `/v1/studio/members/${steve}`)).status).toBe(409);
+     expect((await call('steve', 'DELETE', `/v1/studio/members/${kristen}`)).status).toBe(200);
+     expect((await call('kristen', 'GET', '/v1/studio/me')).status).toBe(403);
+diff --git a/vercel.json b/vercel.json
+index efbf8f1..ab7a17d 100644
+--- a/vercel.json
++++ b/vercel.json
+@@ -5,6 +5,7 @@
+   "buildCommand": "npm run build",
+   "crons": [
+     { "path": "/internal/hearken/cron", "schedule": "0 13 * * *" },
+-    { "path": "/internal/bigtable/cron", "schedule": "17 4 * * *" }
++    { "path": "/internal/bigtable/cron", "schedule": "17 4 * * *" },
++    { "path": "/internal/affiliates/cron", "schedule": "41 9 * * *" }
+   ]
+ }

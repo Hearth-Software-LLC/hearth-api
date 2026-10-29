@@ -128,7 +128,7 @@ describe.skipIf(!url)('Hearth Studio (Postgres)', () => {
     const members = await call('kristen', 'GET', '/v1/studio/members');
     expect(members.body.members.map((member: { userId: string }) => member.userId)).toEqual([steve, kristen]);
     const changed = await call('steve', 'PATCH', `/v1/studio/members/${kristen}`, { accounts: true });
-    expect(changed.body.permissions).toEqual({ post: true, plans: true, accounts: true });
+    expect(changed.body.permissions).toEqual({ post: true, plans: true, accounts: true, affiliates: false });
     expect((await call('steve', 'DELETE', `/v1/studio/members/${steve}`)).status).toBe(409);
     expect((await call('steve', 'DELETE', `/v1/studio/members/${kristen}`)).status).toBe(200);
     expect((await call('kristen', 'GET', '/v1/studio/me')).status).toBe(403);

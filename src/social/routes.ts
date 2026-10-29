@@ -117,7 +117,7 @@ export type SocialRouteDependencies = {
 };
 
 const prefix = '/v1/social';
-const APP_NAMES: Record<string, string> = { hearth: 'Hearth Software', bigtable: 'BigTable', suffice: 'Suffice', sated: 'Sated', caloma: 'Caloma', hearken: 'Hearken' };
+const APP_NAMES: Record<string, string> = { hearth: 'Hearth Software', bigtable: 'BigTable', suffice: 'Suffice', sated: 'Sated', caloma: 'Caloma', hearken: 'Hearken', trove: 'Trove', ember: 'Ember' };
 
 export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: SocialRouteDependencies) {
   const service = () => {

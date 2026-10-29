@@ -36,6 +36,7 @@ const what: Record<Permission, string> = {
   post: 'post and reply',
   plans: 'grant plans',
   accounts: 'connect social accounts',
+  affiliates: 'manage affiliates and payouts',
   owner: 'manage the team',
 };
 

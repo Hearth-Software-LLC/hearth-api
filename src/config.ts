@@ -90,6 +90,19 @@ const configSchema = z.object({
   GITHUB_APP_PRIVATE_KEY: z.string().trim().includes('PRIVATE KEY').optional(),
   GITHUB_ORG: z.string().trim().regex(/^[A-Za-z0-9-]{1,39}$/).default('Hearth-Software-LLC'),
   STUDIO_APNS_TOPIC: z.string().trim().regex(/^[A-Za-z0-9.-]+$/).default('com.stephenwarren.hearthstudio'),
+  // Affiliates and campaign links (src/affiliates). An App Store Connect API key (Users and
+  // Access › Integrations › App Store Connect API; the Admin role, once, to request the analytics
+  // reports) for campaign downloads and proceeds by ct= token, and the App Store provider id
+  // (the pt= in campaign links: App Store Connect › Analytics › Campaigns shows it).
+  ASC_KEY_ID: z.string().trim().regex(/^[A-Z0-9]{10}$/).optional(),
+  ASC_ISSUER_ID: z.uuid().optional(),
+  ASC_PRIVATE_KEY: z.string().trim().includes('PRIVATE KEY').optional(),
+  ASC_PROVIDER_ID: z.string().trim().regex(/^\d{3,15}$/).optional(),
+  // Where short links live (GET /go/<slug> on this API, or a site that forwards there).
+  SHORT_LINK_BASE: httpsUrl.default('https://hearthapps.com/go'),
+  // Credit sandbox purchases to affiliates (for testing only).
+  AFFILIATES_ACCEPT_SANDBOX: z.enum(['true', 'false', '1', '0']).default('false')
+    .transform((value) => value === 'true' || value === '1'),
   // Vercel Cron sends it as a bearer token to /internal/* jobs.
   CRON_SECRET: z.string().trim().min(16).optional(),
   // Where links the API hands out point (study group invites).
@@ -111,6 +124,7 @@ const configSchema = z.object({
     ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY'] as const,
     ['META_APP_ID', 'META_APP_SECRET'] as const,
     ['GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY'] as const,
+    ['ASC_KEY_ID', 'ASC_ISSUER_ID', 'ASC_PRIVATE_KEY'] as const,
   ]) {
     const count = group.filter((name) => config[name] !== undefined).length;
     if (count > 0 && count < group.length) {

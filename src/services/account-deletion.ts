@@ -28,6 +28,8 @@ export type AccountDeletionDependencies = {
   hearken?: HearkenService | undefined;
   budgetGroups?: Pick<BudgetGroupsService, 'purgeUser'> | undefined;
   reports?: ReportStore | undefined;
+  /** Ends an affiliate's own sign-in (their credit and payouts are the team's records and stay). */
+  affiliates?: { forgetUser: (userId: string) => Promise<void> } | undefined;
 };
 
 // Set by createApp. The BigTable handlers are plain functions without the app's dependencies,
@@ -200,6 +202,14 @@ export async function deleteHearthAccount(userId: string, options: DeleteAccount
       await dependencies.reports.removeByReporter(userId);
     } catch (error) {
       throw new AccountDeletionError('reports cleanup', 'Failed to delete account', error);
+    }
+  }
+
+  if (dependencies.affiliates) {
+    try {
+      await dependencies.affiliates.forgetUser(userId);
+    } catch (error) {
+      throw new AccountDeletionError('affiliate cleanup', 'Failed to delete account', error);
     }
   }
 

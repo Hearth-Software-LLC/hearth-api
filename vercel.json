@@ -5,6 +5,7 @@
   "buildCommand": "npm run build",
   "crons": [
     { "path": "/internal/hearken/cron", "schedule": "0 13 * * *" },
-    { "path": "/internal/bigtable/cron", "schedule": "17 4 * * *" }
+    { "path": "/internal/bigtable/cron", "schedule": "17 4 * * *" },
+    { "path": "/internal/affiliates/cron", "schedule": "41 9 * * *" }
   ]
 }

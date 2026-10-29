@@ -10,7 +10,7 @@ import { isUniqueViolation, newInviteCode } from '../hearken/service.js';
  * sees one of them, so there's nothing to set up by hand.
  */
 
-export type Permission = 'post' | 'plans' | 'accounts' | 'owner';
+export type Permission = 'post' | 'plans' | 'accounts' | 'affiliates' | 'owner';
 
 export type Member = {
   teamId: string;
@@ -20,6 +20,8 @@ export type Member = {
   canPost: boolean;
   canPlans: boolean;
   canAccounts: boolean;
+  /** See amounts owed, change affiliates' terms and mark payouts. */
+  canAffiliates: boolean;
   displayName: string | null;
   /** The profile photo's path in the library bucket. */
   avatarPath: string | null;
@@ -32,6 +34,7 @@ export type Member = {
 export function can(member: Member, permission: Permission): boolean {
   if (member.role === 'owner') return true;
   if (permission === 'owner') return false;
+  if (permission === 'affiliates') return member.canAffiliates;
   return permission === 'post' ? member.canPost : permission === 'plans' ? member.canPlans : member.canAccounts;
 }
 
@@ -40,7 +43,7 @@ const iso = (value: unknown) => (value instanceof Date ? value.toISOString() : S
 function member(row: Record<string, unknown>): Member {
   return {
     teamId: String(row.team_id), teamName: String(row.team_name ?? ''), userId: String(row.user_id),
-    role: row.role as Member['role'], canPost: row.can_post === true, canPlans: row.can_plans === true, canAccounts: row.can_accounts === true,
+    role: row.role as Member['role'], canPost: row.can_post === true, canPlans: row.can_plans === true, canAccounts: row.can_accounts === true, canAffiliates: row.can_affiliates === true,
     displayName: (row.display_name as string | null) ?? null,
     avatarPath: (row.avatar_path as string | null) ?? null,
     notifyDue: row.notify_due !== false, notifyComments: row.notify_comments !== false, notifyFailed: row.notify_failed !== false,
@@ -103,12 +106,13 @@ export function createTeamService(sql: Sql, options: { ownerIds: string[]; now?:
       return row ? { id: String(row.id), slug: String(row.slug), name: String(row.name), keepRuns: Number(row.keep_runs) } : undefined;
     },
 
-    async updateMember(teamId: string, userId: string, patch: { canPost?: boolean; canPlans?: boolean; canAccounts?: boolean; displayName?: string | null }) {
+    async updateMember(teamId: string, userId: string, patch: { canPost?: boolean; canPlans?: boolean; canAccounts?: boolean; canAffiliates?: boolean; displayName?: string | null }) {
       const [row] = await sql`
         update studio_members set
           can_post = coalesce(${patch.canPost ?? null}, can_post),
           can_plans = coalesce(${patch.canPlans ?? null}, can_plans),
           can_accounts = coalesce(${patch.canAccounts ?? null}, can_accounts),
+          can_affiliates = coalesce(${patch.canAffiliates ?? null}, can_affiliates),
           display_name = case when ${patch.displayName !== undefined} then ${patch.displayName ?? null} else display_name end
         where team_id = ${teamId} and user_id = ${userId}
         returning *`;
@@ -135,14 +139,14 @@ export function createTeamService(sql: Sql, options: { ownerIds: string[]; now?:
         where team_id = ${teamId} and user_id = ${userId}`;
     },
 
-    async createInvite(teamId: string, by: string, permissions: { canPost: boolean; canPlans: boolean; canAccounts: boolean }) {
+    async createInvite(teamId: string, by: string, permissions: { canPost: boolean; canPlans: boolean; canAccounts: boolean; canAffiliates?: boolean }) {
       const expiresAt = new Date(now() + 7 * 86_400_000);
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const code = newInviteCode();
         try {
           await sql`
-            insert into studio_invites (code, team_id, can_post, can_plans, can_accounts, created_by, expires_at)
-            values (${code}, ${teamId}, ${permissions.canPost}, ${permissions.canPlans}, ${permissions.canAccounts}, ${by}, ${expiresAt})`;
+            insert into studio_invites (code, team_id, can_post, can_plans, can_accounts, can_affiliates, created_by, expires_at)
+            values (${code}, ${teamId}, ${permissions.canPost}, ${permissions.canPlans}, ${permissions.canAccounts}, ${permissions.canAffiliates ?? false}, ${by}, ${expiresAt})`;
           return { code, expiresAt: expiresAt.toISOString() };
         } catch (error) {
           if (!isUniqueViolation(error)) throw error;
@@ -157,12 +161,13 @@ export function createTeamService(sql: Sql, options: { ownerIds: string[]; now?:
           select * from studio_invites where code = ${code.toUpperCase()} and used_at is null and expires_at > ${new Date(now())} for update`;
         if (!invite) throw new ApiError(404, 'INVITE_NOT_FOUND', 'That invite is used, expired or doesn’t exist. Ask for a new one.');
         await tx`
-          insert into studio_members (team_id, user_id, role, can_post, can_plans, can_accounts, display_name, added_by)
-          values (${invite.team_id}, ${userId}, 'member', ${invite.can_post}, ${invite.can_plans}, ${invite.can_accounts}, ${displayName}, ${invite.created_by})
+          insert into studio_members (team_id, user_id, role, can_post, can_plans, can_accounts, can_affiliates, display_name, added_by)
+          values (${invite.team_id}, ${userId}, 'member', ${invite.can_post}, ${invite.can_plans}, ${invite.can_accounts}, ${invite.can_affiliates === true}, ${displayName}, ${invite.created_by})
           on conflict (team_id, user_id) do update set
             can_post = studio_members.can_post or excluded.can_post,
             can_plans = studio_members.can_plans or excluded.can_plans,
-            can_accounts = studio_members.can_accounts or excluded.can_accounts`;
+            can_accounts = studio_members.can_accounts or excluded.can_accounts,
+            can_affiliates = studio_members.can_affiliates or excluded.can_affiliates`;
         await tx`update studio_invites set used_by = ${userId}, used_at = now() where code = ${invite.code}`;
         return String(invite.team_id);
       }) as Promise<string>;
