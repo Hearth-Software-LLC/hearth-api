@@ -58,6 +58,29 @@ describe('Meta client', () => {
     expect(graph.calls[2]!.params.get('appsecret_proof')).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it('finds the Pages a Login for Business token was granted when me/accounts is empty', async () => {
+    const graph = fakeGraph({
+      'GET me/accounts': { data: [] },
+      'GET debug_token': { data: { granular_scopes: [{ scope: 'pages_show_list', target_ids: ['page-7'] }, { scope: 'business_management' }] } },
+      'GET page-7': { id: 'page-7', name: 'Hearth Software', access_token: 'pt-7',
+        instagram_business_account: { id: 'ig-7', username: 'hearthsoftware' } },
+    });
+    const accounts = await createMetaClient(settings, graph.fetcher).accounts('long');
+    expect(accounts.map((account) => [account.platform, account.externalId])).toEqual([['facebook', 'page-7'], ['instagram', 'ig-7']]);
+    expect(graph.calls[1]!.params.get('access_token')).toBe('123456|secret-secret-secret');
+  });
+
+  it('finds Pages through business portfolios when me/accounts is empty', async () => {
+    const graph = fakeGraph({
+      'GET me/accounts': { data: [] },
+      'GET debug_token': { data: { granular_scopes: [] } },
+      'GET me/businesses': { data: [{ id: 'biz-1', owned_pages: { data: [{ id: 'page-9' }] } }] },
+      'GET page-9': { id: 'page-9', name: 'Hearth Software', access_token: 'pt-9' },
+    });
+    const accounts = await createMetaClient(settings, graph.fetcher).accounts('long');
+    expect(accounts).toEqual([{ platform: 'facebook', externalId: 'page-9', name: 'Hearth Software', handle: null, avatarUrl: null, token: 'pt-9' }]);
+  });
+
   it('publishes an Instagram photo with its first comment', async () => {
     const graph = fakeGraph({
       'POST ig-1/media': { id: 'container-1' },

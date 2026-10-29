@@ -262,11 +262,45 @@ export function createMetaClient(settings: MetaSettings, fetcher: typeof fetch =
         id: string; name: string; access_token?: string; picture?: { data?: { url?: string } };
         instagram_business_account?: { id: string; username?: string; name?: string; profile_picture_url?: string };
       };
-      const pages = await graph<{ data?: Page[] }>('GET', 'me/accounts', {
-        fields: 'id,name,access_token,picture{url},instagram_business_account{id,username,name,profile_picture_url}', limit: 100,
-      }, userToken);
+      const fields = 'id,name,access_token,picture{url},instagram_business_account{id,username,name,profile_picture_url}';
+      const pages = new Map<string, Page>();
+      const found = await graph<{ data?: Page[] }>('GET', 'me/accounts', { fields, limit: 100 }, userToken);
+      for (const page of found.data ?? []) pages.set(page.id, page);
+
+      // Facebook Login for Business grants Pages one by one; the token's granular scopes name them,
+      // including Pages a portfolio owns that me/accounts leaves out.
+      if (pages.size === 0) {
+        type Debug = { data?: { granular_scopes?: { scope: string; target_ids?: string[] }[] } };
+        const debug = await graph<Debug>('GET', 'debug_token', {
+          input_token: userToken, access_token: `${settings.appId}|${settings.appSecret}`,
+        }).catch(() => ({} as Debug));
+        const ids = new Set((debug.data?.granular_scopes ?? [])
+          .filter((entry) => entry.scope.startsWith('pages_'))
+          .flatMap((entry) => entry.target_ids ?? []));
+        for (const id of ids) {
+          const page = await graph<Page>('GET', id, { fields }, userToken).catch(() => undefined);
+          if (page) pages.set(page.id, page);
+        }
+      }
+
+      // A Page a business portfolio owns isn't always in me/accounts (the person reaches it through
+      // the portfolio, not a role of their own). Look through the portfolios too.
+      if (pages.size === 0) {
+        type Business = { id: string; owned_pages?: { data?: { id: string }[] }; client_pages?: { data?: { id: string }[] } };
+        const businesses = await graph<{ data?: Business[] }>('GET', 'me/businesses', {
+          fields: 'id,owned_pages.limit(50){id},client_pages.limit(50){id}', limit: 25,
+        }, userToken).catch((error) => { if (error instanceof MetaError && error.auth) throw error; return { data: [] as Business[] }; });
+        const ids = new Set((businesses.data ?? []).flatMap((business) => [
+          ...(business.owned_pages?.data ?? []), ...(business.client_pages?.data ?? []),
+        ].map((page) => page.id)));
+        for (const id of ids) {
+          const page = await graph<Page>('GET', id, { fields }, userToken).catch(() => undefined);
+          if (page) pages.set(page.id, page);
+        }
+      }
+
       const accounts: MetaAccount[] = [];
-      for (const page of pages.data ?? []) {
+      for (const page of pages.values()) {
         if (!page.access_token) continue;
         accounts.push({ platform: 'facebook', externalId: page.id, name: page.name, handle: null, avatarUrl: page.picture?.data?.url ?? null, token: page.access_token });
         const ig = page.instagram_business_account;
@@ -278,6 +312,12 @@ export function createMetaClient(settings: MetaSettings, fetcher: typeof fetch =
         }
       }
       return accounts;
+    },
+
+    /** The permissions the login granted (for explaining an empty login). */
+    async grantedPermissions(userToken: string): Promise<string[]> {
+      const list = await graph<{ data?: { permission: string; status: string }[] }>('GET', 'me/permissions', {}, userToken).catch(() => ({ data: [] }));
+      return (list.data ?? []).filter((entry) => entry.status === 'granted').map((entry) => entry.permission);
     },
 
     /** Posts now. Instagram video that's still processing after `waitMs` comes back as processing. */

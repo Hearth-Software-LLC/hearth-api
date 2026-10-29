@@ -20,6 +20,7 @@ function fakeMeta() {
   return {
     authorizeUrl: vi.fn((state: string) => `https://www.facebook.com/v24.0/dialog/oauth?state=${state}`),
     exchangeCode: vi.fn(async () => 'long-user-token'),
+    grantedPermissions: vi.fn(async () => ['pages_show_list', 'pages_manage_posts', 'business_management']),
     accounts: vi.fn(async () => [
       { platform: 'facebook' as const, externalId: 'page-1', name: 'Sated', handle: null, avatarUrl: null, token: 'page-token' },
       { platform: 'instagram' as const, externalId: 'ig-1', name: 'satedapp', handle: 'satedapp', avatarUrl: null, token: 'page-token' },
@@ -140,6 +141,14 @@ describe.skipIf(!url)('social pages (Postgres)', () => {
     expect(JSON.stringify(connections)).not.toContain('token');
     const raw = await sql`select token_sealed from social_connections`;
     expect(raw.every((row) => String(row.token_sealed).startsWith('v1.'))).toBe(true);
+  });
+
+  it('explains a login that shared no Pages', async () => {
+    meta.accounts.mockResolvedValueOnce([]);
+    const start = await call('steve', 'POST', '/v1/social/connections/meta/start', { app: 'hearth' });
+    const state = new URL(start.body.url).searchParams.get('state')!;
+    const back = await app.request(`/oauth/meta/callback?code=abc&state=${encodeURIComponent(state)}`);
+    expect(decodeURIComponent(back.headers.get('location')!.replace(/\+/g, ' '))).toContain('pick the Hearth Software Page');
   });
 
   it('refuses a tampered or missing login state', async () => {

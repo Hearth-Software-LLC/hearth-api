@@ -207,6 +207,14 @@ export function createSocialService(options: SocialServiceOptions) {
       const meta = requireMeta();
       const userToken = await meta.exchangeCode(code);
       const accounts = await meta.accounts(userToken);
+      if (accounts.length === 0) {
+        const granted = await meta.grantedPermissions(userToken);
+        const missing = ['pages_show_list', 'pages_manage_posts', 'business_management'].filter((name) => !granted.includes(name));
+        log({ route: 'social.login', pages: 0, granted });
+        throw new ApiError(422, 'NO_PAGES', missing.length
+          ? `The login didn’t grant ${missing.join(', ')}. Connect again and allow everything Facebook asks for.`
+          : 'Facebook didn’t share any Pages. Connect again and, when Facebook asks which Pages to share, pick the Hearth Software Page (choose “Opt in to all current and future Pages” if offered).');
+      }
       const pages = accounts.filter((account) => account.platform === 'facebook');
       // One Page (and its Instagram) is clearly the app's; more than one, you pick in Accounts.
       const assign = app && pages.length === 1 ? app : null;
