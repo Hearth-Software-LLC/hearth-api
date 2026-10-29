@@ -68,6 +68,19 @@ const configSchema = z.object({
   // Realtime › TURN). Without them calls get STUN only.
   CLOUDFLARE_TURN_KEY_ID: z.string().trim().min(1).optional(),
   CLOUDFLARE_TURN_API_TOKEN: z.string().trim().min(1).optional(),
+  // Hearth Ship's social pages (src/social). A Meta developer app (left in development mode: its
+  // admins can use every permission on their own Pages without App Review). Its login redirect
+  // URI is PUBLIC_BASE_URL + /oauth/meta/callback.
+  META_APP_ID: z.string().trim().regex(/^\d{5,20}$/).optional(),
+  META_APP_SECRET: z.string().trim().min(16).optional(),
+  META_GRAPH_VERSION: z.string().trim().regex(/^v\d+\.\d+$/).default('v24.0'),
+  // A Facebook Login for Business configuration id, for business-type apps (replaces the scope list).
+  META_LOGIN_CONFIG_ID: z.string().trim().regex(/^\d{5,25}$/).optional(),
+  // Seals the Pages' access tokens (like PLAID_TOKEN_KEY, a separate 32-byte base64 key).
+  SOCIAL_TOKEN_KEY: tokenKey.optional(),
+  // The Hearth account ids (comma-separated) allowed to use /v1/social.
+  SOCIAL_OWNER_IDS: z.string().transform((value) => value.split(',').map((entry) => entry.trim()).filter(Boolean))
+    .pipe(z.array(z.uuid()).max(10)).prefault(''),
   // Vercel Cron sends it as a bearer token to /internal/* jobs.
   CRON_SECRET: z.string().trim().min(16).optional(),
   // Where links the API hands out point (study group invites).
@@ -87,6 +100,7 @@ const configSchema = z.object({
     ['SUPABASE_URL', 'SUPABASE_SECRET_KEY'] as const,
     ['FATSECRET_CLIENT_ID', 'FATSECRET_CLIENT_SECRET'] as const,
     ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY'] as const,
+    ['META_APP_ID', 'META_APP_SECRET'] as const,
   ]) {
     const count = group.filter((name) => config[name] !== undefined).length;
     if (count > 0 && count < group.length) {

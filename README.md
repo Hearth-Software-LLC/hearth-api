@@ -62,6 +62,11 @@ HEARKEN_TEST_DATABASE_URL=postgres://localhost/hearken_test npm test
 | `HEARKEN_APNS_TOPIC` | Hearken's bundle id; default `com.stephenwarren.hearken` |
 | `CRON_SECRET` | Shared secret Vercel Cron sends to `/internal/*` (16+ characters) |
 | `PUBLIC_BASE_URL` | Base of invite links; default `https://api.hearthapps.com` |
+| `META_APP_ID`, `META_APP_SECRET` | Meta developer app for Hearth Ship's social pages (Facebook Pages and Instagram). Its login redirect is `PUBLIC_BASE_URL` + `/oauth/meta/callback` |
+| `META_GRAPH_VERSION` | Graph API version; default `v24.0` |
+| `META_LOGIN_CONFIG_ID` | Facebook Login for Business configuration id (business-type Meta apps); replaces the scope list |
+| `SOCIAL_TOKEN_KEY` | 32-byte base64 key sealing the Pages' tokens (`openssl rand -base64 32`); separate from `PLAID_TOKEN_KEY` |
+| `SOCIAL_OWNER_IDS` | Hearth account ids (comma-separated) allowed to use `/v1/social` |
 
 ## Account deletion
 

@@ -134,6 +134,18 @@ The request carries the app's App Store listing, the campaign brief, audience an
 
 Hearth Ship signs in with `scripts/dev-session.ts` (`npm run dev-session`), which makes a one-time magic link with the secret key and redeems it at once, for an account chosen from Test Plans. It grants nothing beyond what holding the secret key already does.
 
+### Social pages for Hearth Ship
+
+`/v1/social/*` lets Hearth Ship run the Hearth apps' own social accounts (`src/social`): posts (drafts, scheduled, published), an inbox of comments, and numbers. Only the accounts in `SOCIAL_OWNER_IDS` can use it.
+
+- **Facebook Pages and Instagram** go through Meta's Graph API (`meta.ts`). `POST /v1/social/connections/meta/start` returns a Facebook login link; `GET /oauth/meta/callback` swaps the code for a long-lived token, saves every Page the login manages (and its linked Instagram account) with its Page token sealed by `SOCIAL_TOKEN_KEY`, and sends the browser to `hearthship://social/connected`. The Meta app stays in development mode: the people with a role on it can use every permission on their own Pages without App Review.
+- **Every other platform is hand-off.** Hearth Ship prepares the post, you post it in the platform's app, then `POST /v1/social/targets/{id}/posted` records its link. Their numbers arrive as CSV exports that Hearth Ship reads and sends to `POST /v1/social/metrics/import`.
+- **Publishing:** "Post now" is a schedule of now. The request publishes what it can (an Instagram video still processing after 20 seconds stays `processing`); pg_cron calls `GET /internal/social/cron` every 5 minutes (`20261029000100_social_pages_media_and_cron.sql`, with `CRON_SECRET` in Vault as `hearth_api_cron_secret`) to publish what's due, finish processing videos, and sync posts and comments (every 15 minutes) and numbers (every 6 hours). A target is claimed before it's published, so two runs can't post it twice.
+- **Media** lives in the private `social-media` bucket: `POST /v1/social/media` gives Hearth Ship a signed upload URL, and Meta fetches each file from a signed URL when the post goes out.
+- **Reply suggestions:** `POST /v1/social/comments/{id}/suggest` asks Claude for three replies (Hearth+, `marketing` quota), with the comment, its thread and the post's text.
+
+Tables: `social_connections`, `social_posts`, `social_targets` (one per account a post goes to, plus posts found on an account), `social_comments`, `social_metrics` (by day; a post's are its totals as of that day). Tests: `SOCIAL_TEST_DATABASE_URL=postgres://localhost/social_test npm test`.
+
 ### Food Data Providers
 
 Start with one provider selected for the actual workflow: nutrient reference data, packaged-food/barcode lookup, and recipe search are different requirements. Add another only for a demonstrated coverage gap.

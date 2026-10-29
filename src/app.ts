@@ -60,6 +60,13 @@ import type { EmberSpeechDependencies } from './ember/speech.js';
 import { setAccountDeletionDependencies } from './services/account-deletion.js';
 import { requireCronSecret } from './middleware/cron.js';
 import { supabaseAdmin } from './services/supabase.js';
+import { registerSocial } from './social/routes.js';
+import { createSocialService } from './social/service.js';
+import type { SocialMedia, SocialService } from './social/service.js';
+import { createSocialStore } from './social/store.js';
+import type { SocialStore } from './social/store.js';
+import { createMetaClient } from './social/meta.js';
+import type { MetaClient } from './social/meta.js';
 
 export type AppOptions = {
   config?: Config;
@@ -96,6 +103,8 @@ export type AppOptions = {
   adCopy?: Partial<AdCopyDependencies>;
   /** Speech-to-text for Ember on Apple Watch (POST /v1/ember/transcribe). Reads GOOGLE_TTS_API_KEY when not given. */
   emberTranscribe?: Partial<EmberTranscribeDependencies>;
+  /** Hearth Ship's social pages (/v1/social). Built from DATABASE_URL, SOCIAL_TOKEN_KEY and META_* when not given. */
+  social?: { store?: SocialStore; service?: SocialService; meta?: MetaClient; media?: SocialMedia };
 };
 
 type RequestLog = {
@@ -318,6 +327,35 @@ export function createApp(options: AppOptions = {}) {
     ...options.emberSpeech,
   });
 
+  // Hearth Ship's social pages: Facebook and Instagram through Meta, everything else hand-off.
+  const socialStore = options.social?.store ?? (database ? createSocialStore(database) : undefined);
+  const socialMeta = options.social?.meta ?? (config.META_APP_ID && config.META_APP_SECRET
+    ? createMetaClient({
+      appId: config.META_APP_ID, appSecret: config.META_APP_SECRET, version: config.META_GRAPH_VERSION,
+      redirectUri: `${config.PUBLIC_BASE_URL.replace(/\/$/, '')}/oauth/meta/callback`, loginConfigId: config.META_LOGIN_CONFIG_ID,
+    }, options.fetcher ?? fetch)
+    : undefined);
+  const socialService = options.social?.service ?? (socialStore && config.SOCIAL_TOKEN_KEY
+    ? createSocialService({
+      store: socialStore,
+      seal: createTokenSeal(config.SOCIAL_TOKEN_KEY, 'social-access-token', 'Social accounts are temporarily unavailable'),
+      stateKey: Buffer.from(config.SOCIAL_TOKEN_KEY, 'base64'),
+      meta: socialMeta,
+      media: options.social?.media ?? (config.SUPABASE_URL && config.SUPABASE_SECRET_KEY ? supabaseSocialMedia : undefined),
+    })
+    : undefined);
+  registerSocial(app, {
+    config,
+    store: socialStore,
+    service: socialService,
+    owners: config.SOCIAL_OWNER_IDS,
+    reserveQuota,
+    requireHearthPlus: createHearthPlusGate(config.ENFORCE_ENTITLEMENTS, entitlementSource),
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY?.trim() || undefined,
+    model: process.env.MARKETING_MODEL?.trim() || undefined,
+    fetcher: options.fetcher ?? fetch,
+  });
+
   // DELETE /v1/me and DELETE /v1/bigtable/me share one deletion, which needs these.
   setAccountDeletionDependencies({
     plaidClient: plaidDataClient, connections: connectionStore, seal: tokenSeal, hearken, budgetGroups, reports,
@@ -396,3 +434,17 @@ async function purgeMovedKitchensWithServiceRole(): Promise<number> {
   }
   return typeof data === 'number' ? data : 0;
 }
+
+/** Post media in the private social-media bucket (supabase/migrations/20261029000100_social_pages_media_and_cron.sql). */
+const supabaseSocialMedia: SocialMedia = {
+  async uploadUrl(path) {
+    const { data, error } = await supabaseAdmin.storage.from('social-media').createSignedUploadUrl(path);
+    if (error || !data) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Media uploads are temporarily unavailable');
+    return { url: data.signedUrl, token: data.token };
+  },
+  async signedUrl(path, seconds) {
+    const { data, error } = await supabaseAdmin.storage.from('social-media').createSignedUrl(path, seconds);
+    if (error || !data) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Post media is temporarily unavailable');
+    return data.signedUrl;
+  },
+};
