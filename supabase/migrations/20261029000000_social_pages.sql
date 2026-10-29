@@ -1,4 +1,4 @@
--- Hearth Ship's social pages: the Hearth apps' own social accounts, the posts made for them
+-- Hearth Ship's social pages: Hearth Software's social accounts (one brand for every app), the posts made for them
 -- (drafts, scheduled, published), what came back (comments, numbers). Only the developer
 -- accounts in SOCIAL_OWNER_IDS use these, through /v1/social/*.
 --
@@ -21,7 +21,8 @@ create table public.social_connections (
   name text not null check (char_length(name) between 1 and 200),
   handle text check (char_length(handle) <= 100),
   avatar_url text check (char_length(avatar_url) <= 2000),
-  -- The Hearth app this account belongs to (ship.sh's key, e.g. "sated"); null until chosen.
+  -- The brand this account posts for ("hearth" for Hearth Software; an app's key if an app ever
+  -- gets its own); null until chosen.
   app text check (app ~ '^[a-z0-9-]{1,40}$'),
   token_sealed text not null,
   status text not null default 'active' check (status in ('active', 'needs_reconnect')),
@@ -38,6 +39,8 @@ create table public.social_posts (
   id uuid primary key default gen_random_uuid(),
   owner_id uuid not null,
   app text not null check (app ~ '^[a-z0-9-]{1,40}$'),
+  -- Which Hearth app the post is about, if one (ship.sh's key, e.g. "sated").
+  about text check (about ~ '^[a-z0-9-]{1,40}$'),
   text text not null default '' check (char_length(text) <= 5000),
   link text check (char_length(link) <= 2000),
   first_comment text check (char_length(first_comment) <= 2200),

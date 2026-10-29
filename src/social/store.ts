@@ -57,6 +57,7 @@ export type StoredTarget = TargetView & { ownerId: string };
 export type PostView = {
   id: string;
   app: string;
+  about: string | null;
   text: string;
   link: string | null;
   firstComment: string | null;
@@ -88,6 +89,7 @@ export type MetricRow = { platform: string; postKey: string; day: string; metric
 
 export type PostInput = {
   app: string;
+  about: string | null;
   text: string;
   link: string | null;
   firstComment: string | null;
@@ -176,7 +178,7 @@ export function createSocialStore(sql: Sql) {
       byPost.set(view.postId!, [...(byPost.get(view.postId!) ?? []), view]);
     }
     return rows.map((row) => ({
-      id: String(row.id), app: String(row.app), text: String(row.text), link: (row.link as string | null) ?? null,
+      id: String(row.id), app: String(row.app), about: (row.about as string | null) ?? null, text: String(row.text), link: (row.link as string | null) ?? null,
       firstComment: (row.first_comment as string | null) ?? null, media: (row.media as MediaItem[] | null) ?? [],
       draft: row.draft === true, scheduledFor: iso(row.scheduled_for), createdAt: iso(row.created_at)!, updatedAt: iso(row.updated_at)!,
       targets: byPost.get(String(row.id)) ?? [],
@@ -251,8 +253,8 @@ export function createSocialStore(sql: Sql) {
     async createPost(owner: string, input: PostInput, targets: TargetInput[]): Promise<string> {
       return sql.begin(async (tx) => {
         const [row] = await tx`
-          insert into social_posts (owner_id, app, text, link, first_comment, media, draft, scheduled_for)
-          values (${owner}, ${input.app}, ${input.text}, ${input.link}, ${input.firstComment}, ${tx.json(input.media)}, ${input.draft}, ${input.scheduledFor})
+          insert into social_posts (owner_id, app, about, text, link, first_comment, media, draft, scheduled_for)
+          values (${owner}, ${input.app}, ${input.about}, ${input.text}, ${input.link}, ${input.firstComment}, ${tx.json(input.media)}, ${input.draft}, ${input.scheduledFor})
           returning id`;
         const id = String(row!.id);
         for (const item of targets) {
@@ -268,7 +270,7 @@ export function createSocialStore(sql: Sql) {
     async updatePost(owner: string, id: string, input: PostInput, targets: TargetInput[]) {
       await sql.begin(async (tx) => {
         await tx`
-          update social_posts set text = ${input.text}, link = ${input.link}, first_comment = ${input.firstComment},
+          update social_posts set about = ${input.about}, text = ${input.text}, link = ${input.link}, first_comment = ${input.firstComment},
             media = ${tx.json(input.media)}, draft = ${input.draft}, scheduled_for = ${input.scheduledFor}, updated_at = now()
           where owner_id = ${owner} and id = ${id}`;
         const kept = await tx`select platform, connection_id from social_targets where post_id = ${id} and status in ('published', 'publishing', 'processing')`;
