@@ -7,6 +7,7 @@ export const STUDIO_MIGRATIONS = [
   '20261029000100_social_pages_media_and_cron.sql',
   '20261029100000_studio_team.sql',
   '20261029100100_studio_library.sql',
+  '20261029120000_library_one_version.sql',
 ];
 
 export const STUDIO_TABLES = [

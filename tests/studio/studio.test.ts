@@ -187,28 +187,62 @@ describe.skipIf(!url)('Hearth Studio (Postgres)', () => {
     expect((await call('steve', 'GET', `/v1/library/assets/${created.body.id}/url`)).status).toBe(404);
   });
 
-  it('keeps the last two screenshot runs, and anything a post still uses', async () => {
-    const run = async (n: number) => {
-      const started = await call('steve', 'POST', '/v1/library/runs', { app: 'sated', device: 'iPhone 17 Pro', appearance: 'light' });
-      const path = `${teamId}/sated/screenshot/${sha(n)}.webp`;
-      const made = await call('steve', 'POST', '/v1/library/assets', {
-        app: 'sated', kind: 'screenshot', name: '01-home', path, contentType: 'image/webp', bytes: 10, sha256: sha(n), runId: started.body.id, position: 0,
-      });
+  it('keeps one version of each screenshot: a new capture replaces it, and old files go unless a post uses them', async () => {
+    const run = async (pages: [string, number][], appearance = 'light') => {
+      const started = await call('steve', 'POST', '/v1/library/runs', { app: 'sated', device: 'iPhone-17-Pro', appearance });
+      const made: Record<string, { id: string; path: string }> = {};
+      for (const [position, [name, n]] of pages.entries()) {
+        const path = `${teamId}/sated/screenshot/${sha(n)}.webp`;
+        const reply = await call('steve', 'POST', '/v1/library/assets', {
+          app: 'sated', kind: 'screenshot', name, path, contentType: 'image/webp', bytes: 10, sha256: sha(n),
+          device: 'iPhone-17-Pro', appearance, runId: started.body.id, position,
+        });
+        expect(reply.status).toBe(201);
+        made[name] = { id: reply.body.id, path };
+      }
       const done = await call('steve', 'POST', `/v1/library/runs/${started.body.id}/complete`);
-      return { id: made.body.id as string, path, removed: done.body.removed as number };
+      return { made, removed: done.body.removed as number };
     };
-    const first = await run(11);
-    const second = await run(12);
-    // The first run's screenshot is in a post, so it stays when a third run would push it out.
-    await sql`insert into social_posts (team_id, app, text, media) values (${teamId}, 'hearth', 'Look', ${sql.json([{ path: `library/${first.path}`, kind: 'image' }])})`;
-    const third = await run(13);
-    expect(third.removed).toBe(0);
-    const fourth = await run(14);
-    expect(fourth.removed).toBe(1);
-    expect(removed).toEqual([second.path]);
-    const live = await call('steve', 'GET', '/v1/library/assets?since=0&kind=screenshot');
-    expect(live.body.assets.map((item: { id: string }) => item.id).sort()).toContain(first.id);
-    expect(live.body.assets).toHaveLength(3);
+    const live = async () => (await call('steve', 'GET', '/v1/library/assets?since=0&kind=screenshot')).body.assets as
+      { id: string; name: string; path: string; appearance: string }[];
+
+    const first = await run([['01-home', 11], ['02-plan', 21]]);
+    // A new capture of 01-home replaces it: same id, new file, the old file removed.
+    const second = await run([['01-home', 12], ['02-plan', 21]]);
+    expect(second.made['01-home']!.id).toBe(first.made['01-home']!.id);
+    expect(removed).toEqual([first.made['01-home']!.path]);
+    expect((await live()).map((item) => item.name).sort()).toEqual(['01-home', '02-plan']);
+
+    // A post uses the current 01-home, so replacing it keeps that file.
+    await sql`insert into social_posts (team_id, app, text, media) values (${teamId}, 'hearth', 'Look', ${sql.json([{ path: `library/${second.made['01-home']!.path}`, kind: 'image' }])})`;
+    removed = [];
+    await run([['01-home', 13], ['02-plan', 21]]);
+    expect(removed).toEqual([]);
+
+    // Landscape is its own version, not a replacement.
+    await run([['01-home', 14]], 'light-landscape');
+    expect((await live()).filter((item) => item.name === '01-home')).toHaveLength(2);
+
+    // A page no longer captured goes once it's past the last two runs.
+    await run([['01-home', 15]]);
+    const last = await run([['01-home', 16]]);
+    expect(last.removed).toBe(1);
+    expect((await live()).filter((item) => item.appearance === 'light').map((item) => item.name)).toEqual(['01-home']);
+  });
+
+  it('keeps one version of each mockup, and any number of uploads', async () => {
+    const add = (kind: string, n: number, device: string | null) => call('steve', 'POST', '/v1/library/assets', {
+      app: 'sated', kind, name: '01-home', path: `${teamId}/sated/${kind}/${sha(n)}.webp`, contentType: 'image/webp', bytes: 10,
+      sha256: sha(n), device, appearance: device ? 'light' : null,
+    });
+    const a = await add('mockup', 31, 'iPhone-18-Pro-Silver');
+    const b = await add('mockup', 32, 'iPhone-18-Pro-Silver');
+    expect(b.body.id).toBe(a.body.id);
+    const other = await add('mockup', 33, 'iPhone-18-Pro-Black');
+    expect(other.body.id).not.toBe(a.body.id);
+    const u1 = await add('upload', 34, null);
+    const u2 = await add('upload', 35, null);
+    expect(u2.body.id).not.toBe(u1.body.id);
   });
 
   it('lets a post use a Library file', async () => {

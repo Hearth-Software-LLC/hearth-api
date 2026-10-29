@@ -1,5 +1,6 @@
 import type { Sql } from 'postgres';
 import { ApiError } from '../errors.js';
+import { isUniqueViolation } from '../hearken/service.js';
 
 /**
  * The Library: the team's screenshots, chosen mockups, ad images, uploads and app icons, in the
@@ -10,6 +11,8 @@ import { ApiError } from '../errors.js';
  */
 
 export const LIBRARY_KINDS = ['screenshot', 'mockup', 'ad', 'upload', 'icon'] as const;
+/** Kinds the Library keeps one version of (per app, device, appearance and page). */
+const ONE_VERSION = new Set<string>(['screenshot', 'mockup']);
 export type LibraryKind = typeof LIBRARY_KINDS[number];
 export const LIBRARY_TYPES = {
   'image/webp': 'webp', 'image/png': 'png', 'image/jpeg': 'jpg', 'image/heic': 'heic', 'video/mp4': 'mp4', 'video/quicktime': 'mov',
@@ -94,6 +97,23 @@ export function createLibraryService(sql: Sql, options: { storage?: StudioStorag
     return keep;
   }
 
+  /** Deletes stored files no live asset points to and no post, campaign or design mentions. */
+  async function removeUnused(team: string, paths: string[]) {
+    if (paths.length === 0 || !options.storage) return;
+    const live = await sql`
+      select path, thumb_path from library_assets where team_id = ${team} and deleted_at is null
+        and (path = any(${paths}::text[]) or thumb_path = any(${paths}::text[]))`;
+    const still = new Set(live.flatMap((row) => [row.path, row.thumb_path]).filter(Boolean).map(String));
+    const [posts, campaigns, designs] = await Promise.all([
+      sql`select media::text as text from social_posts where team_id = ${team}`,
+      sql`select document::text as text from marketing_campaigns where team_id = ${team} and deleted_at is null`,
+      sql`select document::text as text from store_designs where team_id = ${team}`,
+    ]);
+    const haystack = [...posts, ...campaigns, ...designs].map((row) => String(row.text)).join('\n');
+    const gone = paths.filter((path) => !still.has(path) && !haystack.includes(path));
+    if (gone.length) await options.storage.remove(gone).catch(() => undefined);
+  }
+
   async function deleteAssets(team: string, items: AssetView[]) {
     if (items.length === 0) return;
     const ids = items.map((item) => item.id);
@@ -142,15 +162,54 @@ export function createLibraryService(sql: Sql, options: { storage?: StudioStorag
         const [run] = await sql`select id from library_runs where id = ${input.runId} and team_id = ${team}`;
         if (!run) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Run not found');
       }
+      const values = {
+        device: input.device ?? null, appearance: input.appearance ?? null, thumbPath: input.thumbPath ?? null,
+        width: input.width ?? null, height: input.height ?? null, runId: input.runId ?? null, position: input.position ?? null,
+      };
+      // Screenshots and mockups: one version per app, device, appearance and page. A new one
+      // replaces it in place (same id), and the old files go unless something still uses them.
+      if (ONE_VERSION.has(input.kind)) {
+        // Two uploads of a new page at once: the second becomes a replace.
+        const attempt = () => sql.begin(async (tx) => {
+          const [current] = await tx`
+            select * from library_assets
+            where team_id = ${team} and app = ${input.app} and kind = ${input.kind} and deleted_at is null
+              and coalesce(device, '') = ${values.device ?? ''} and coalesce(appearance, '') = ${values.appearance ?? ''}
+              and name = ${input.name}
+            for update`;
+          if (current) {
+            const [updated] = await tx`
+              update library_assets set path = ${input.path}, thumb_path = ${values.thumbPath}, content_type = ${input.contentType},
+                width = ${values.width}, height = ${values.height}, bytes = ${input.bytes}, sha256 = ${input.sha256},
+                run_id = coalesce(${values.runId}, run_id), position = coalesce(${values.position}, position),
+                updated_at = now(), seq = nextval('studio_change_seq')
+              where id = ${current.id}
+              returning *`;
+            return { row: updated!, replaced: asset(current) };
+          }
+          const [inserted] = await tx`
+            insert into library_assets (team_id, app, kind, device, appearance, name, path, thumb_path, content_type, width, height, bytes, sha256, run_id, position, created_by)
+            values (${team}, ${input.app}, ${input.kind}, ${values.device}, ${values.appearance}, ${input.name}, ${input.path},
+              ${values.thumbPath}, ${input.contentType}, ${values.width}, ${values.height}, ${input.bytes}, ${input.sha256},
+              ${values.runId}, ${values.position}, ${user})
+            returning *`;
+          return { row: inserted!, replaced: undefined };
+        }) as Promise<{ row: Record<string, unknown>; replaced: AssetView | undefined }>;
+        const { row, replaced } = await attempt().catch((error: unknown) => {
+          if (isUniqueViolation(error)) return attempt();
+          throw error;
+        });
+        if (replaced) {
+          const old = [replaced.path, replaced.thumbPath].filter((p): p is string => !!p && p !== row.path && p !== row.thumb_path);
+          await removeUnused(team, old);
+        }
+        return asset(row);
+      }
       const rows = await sql`
         insert into library_assets (team_id, app, kind, device, appearance, name, path, thumb_path, content_type, width, height, bytes, sha256, run_id, position, created_by)
-        values (${team}, ${input.app}, ${input.kind}, ${input.device ?? null}, ${input.appearance ?? null}, ${input.name}, ${input.path},
-          ${input.thumbPath ?? null}, ${input.contentType}, ${input.width ?? null}, ${input.height ?? null}, ${input.bytes}, ${input.sha256},
-          ${input.runId ?? null}, ${input.position ?? null}, ${user})
-        on conflict (run_id, name) where run_id is not null and deleted_at is null do update set
-          path = excluded.path, thumb_path = excluded.thumb_path, content_type = excluded.content_type, width = excluded.width,
-          height = excluded.height, bytes = excluded.bytes, sha256 = excluded.sha256, position = excluded.position,
-          updated_at = now(), seq = nextval('studio_change_seq')
+        values (${team}, ${input.app}, ${input.kind}, ${values.device}, ${values.appearance}, ${input.name}, ${input.path},
+          ${values.thumbPath}, ${input.contentType}, ${values.width}, ${values.height}, ${input.bytes}, ${input.sha256},
+          ${values.runId}, ${values.position}, ${user})
         returning *`;
       return asset(rows[0]!);
     },
