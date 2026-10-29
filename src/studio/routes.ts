@@ -16,6 +16,8 @@ import type { PlansBackend } from './plans.js';
 import type { MonetizationBackend } from './monetization.js';
 import { DESCRIPTION_LIMIT, DISPLAY_NAME_LIMIT, PERIODS, TRIALS } from './storeProducts.js';
 import type { StoreProducts } from './storeProducts.js';
+import { HEARTH_SCOPE, desiredProducts, setUpProduct } from './monetizationPlans.js';
+import type { PlanStore } from './monetizationPlans.js';
 import { can } from './team.js';
 import type { Member, TeamService } from './team.js';
 
@@ -34,6 +36,8 @@ export type StudioDependencies = {
   monetization: () => MonetizationBackend | undefined;
   /** Creating and finishing products in App Store Connect and RevenueCat (admins). */
   storeProducts: () => StoreProducts | undefined;
+  /** The plans each app sells, as the team defines them. */
+  planDefinitions: () => PlanStore | undefined;
   /** For the grant log. */
   sql: () => Sql | undefined;
 };
@@ -361,6 +365,79 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     const { app: key, productId, id } = context.req.valid('param');
     const target = await storeApp(key);
     return context.json(await products().commitScreenshot(target.appStoreId, target.bundleId, productId, id, context.req.valid('json').checksum), 200);
+  });
+
+  // Plan definitions (billing, price, trial, what it unlocks) and Set Up Plans.
+  const definitions = () => required(dependencies.planDefinitions, 'Plan definitions (DATABASE_URL)');
+  const planTerm = z.object({
+    price: z.string().regex(/^\d{1,5}(\.\d{1,2})?$/),
+    trial: z.union([z.enum(TRIALS), z.literal('')]).optional(),
+  }).strict();
+  const planDefinition = z.object({
+    monthly: planTerm.optional(), annual: planTerm.optional(), lifetime: planTerm.omit({ trial: true }).optional(),
+    unlocks: z.string().trim().max(DESCRIPTION_LIMIT).optional(),
+    soldIn: z.enum(['us', 'everywhere']).optional(),
+    reviewNote: z.string().trim().max(4000).optional(),
+  }).strict();
+
+  app.openapi(route('Studio monetization', {
+    method: 'get', path: '/v1/studio/monetization/plans', summary: 'The plans each app sells (and Hearth+, scope "hearth"), as the team defines them',
+    responses: { 200: anyJson('Plan definitions'), ...errors },
+  }), async (context) => {
+    const member = need(context, 'plans');
+    return context.json({ plans: await definitions().list(member.teamId) }, 200);
+  });
+
+  app.openapi(route('Studio monetization', {
+    method: 'put', path: '/v1/studio/monetization/plans/{scope}', summary: 'Save an app’s plans (or Hearth+’s, scope "hearth"); version 0 creates',
+    request: {
+      params: z.object({ scope: appKey.openapi({ param: { name: 'scope', in: 'path' } }) }),
+      ...body(z.object({ definition: planDefinition, version: z.number().int().min(0) }).strict()),
+    },
+    responses: { 200: anyJson('Plan definition'), ...errors, 409: anyJson('Saved since version: the error and the current plans') },
+  }), async (context) => {
+    const member = need(context, 'monetization');
+    const input = context.req.valid('json');
+    const definition = JSON.parse(JSON.stringify(input.definition)) as Record<string, unknown>;
+    try {
+      return context.json(await definitions().save(member.teamId, member.userId, context.req.valid('param').scope, definition, input.version), 200);
+    } catch (error) {
+      if (error instanceof VersionConflict) return context.json({ error: { code: error.code, message: error.message, requestId: context.get('requestId') }, current: error.current }, 409);
+      throw error;
+    }
+  });
+
+  const desiredFor = async (teamId: string, key: string) => {
+    const target = await storeApp(key);
+    const [own, hearth] = await Promise.all([definitions().get(teamId, key), definitions().get(teamId, HEARTH_SCOPE)]);
+    return { target, desired: desiredProducts({ key, name: target.name, bundleId: target.bundleId }, own?.definition, hearth?.definition) };
+  };
+
+  app.openapi(route('Studio monetization', {
+    method: 'get', path: '/v1/studio/monetization/{app}/setup', summary: 'The products an app’s plans (and Hearth+) call for, by the house conventions',
+    request: { params: z.object({ app: appKey.openapi({ param: { name: 'app', in: 'path' } }) }) },
+    responses: { 200: anyJson('Products to set up'), ...errors },
+  }), async (context) => {
+    const member = need(context, 'monetization');
+    const { desired } = await desiredFor(member.teamId, context.req.valid('param').app);
+    return context.json({ products: desired }, 200);
+  });
+
+  app.openapi(route('Studio monetization', {
+    method: 'post', path: '/v1/studio/monetization/{app}/setup/{productId}',
+    summary: 'Create the product if it’s missing and fill what’s blank from the plan (force: use the plan’s values everywhere)',
+    request: {
+      params: productParams,
+      ...body(z.object({ force: z.boolean().optional(), replaceInPackage: z.boolean().optional() }).strict()),
+    },
+    responses: { 200: anyJson('What was done'), ...errors },
+  }), async (context) => {
+    const member = need(context, 'monetization');
+    const { app: key, productId } = context.req.valid('param');
+    const { target, desired } = await desiredFor(member.teamId, key);
+    const wanted = desired.find((entry) => entry.productId === productId);
+    if (!wanted) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'No plan calls for that product');
+    return context.json(await setUpProduct(products(), target, wanted, defined(context.req.valid('json'))), 200);
   });
 
   // MARK: Plans

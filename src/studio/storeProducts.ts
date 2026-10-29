@@ -559,12 +559,16 @@ export function createStoreProducts(options: { asc: AscClient; revenueCat?: Reve
   }
 
   /** Checked before anything is written, so a package conflict never leaves a half-saved product. */
-  async function checkPackage(bundleId: string, productId: string, changes: ProductChanges) {
-    if (!changes.package || changes.replaceInPackage || !rc) return;
+  async function checkPackage(bundleId: string, productId: string, changes: ProductChanges, approved: boolean) {
+    if (!changes.package || !rc) return;
     const { others } = packageHolders(await revenueCat(bundleId, productId), changes.package, productId);
-    if (others.length) {
-      throw new ApiError(409, 'PACKAGE_TAKEN', `${changes.package} already sells ${others.map((item) => String(item.store_identifier ?? item.id)).join(', ')} in this app.`);
+    if (!others.length) return;
+    const names = others.map((item) => String(item.store_identifier ?? item.id)).join(', ');
+    // The live paywall would sell something nobody can buy until Apple approves it.
+    if (!approved) {
+      throw new ApiError(422, 'NOT_APPROVED', `${changes.package} sells ${names} on the live paywall. This product isn’t approved by Apple yet, so it can replace that only after approval.`);
     }
+    if (!changes.replaceInPackage) throw new ApiError(409, 'PACKAGE_TAKEN', `${changes.package} already sells ${names} in this app.`);
   }
 
   async function writeRevenueCat(bundleId: string, found: Located, productId: string, referenceName: string, changes: ProductChanges) {
@@ -599,6 +603,9 @@ export function createStoreProducts(options: { asc: AscClient; revenueCat?: Reve
       const packId = encodeURIComponent(String(pack.id));
       if (!productsOf(pack).some((item) => String(item.id) === rcProductId)) {
         if (others.length) {
+          if (found.item.attributes?.state !== 'APPROVED') {
+            throw new ApiError(422, 'NOT_APPROVED', `${changes.package} sells another product on the live paywall; this one can replace it after Apple approves it.`);
+          }
           if (!changes.replaceInPackage) {
             throw new ApiError(409, 'PACKAGE_TAKEN', `${changes.package} already sells ${others.map((item) => String(item.store_identifier ?? item.id)).join(', ')} in this app.`);
           }
@@ -706,7 +713,7 @@ export function createStoreProducts(options: { asc: AscClient; revenueCat?: Reve
     const done: string[] = [];
     const warnings: string[] = [];
     // A package conflict is found before anything is written.
-    await checkPackage(bundleId, productId, changes);
+    await checkPackage(bundleId, productId, changes, found.item.attributes?.state === 'APPROVED');
     const step = async (name: string, work: () => Promise<void>) => {
       try {
         await work();
@@ -775,13 +782,15 @@ export function createStoreProducts(options: { asc: AscClient; revenueCat?: Reve
     if (await locate(appStoreId, input.productId)) {
       throw new ApiError(409, 'PRODUCT_EXISTS', `${input.productId} already exists in this app`);
     }
-    await checkPackage(bundleId, input.productId, input.changes);
+    await checkPackage(bundleId, input.productId, input.changes, false);
     let created: Item | undefined;
     try {
       if (input.kind === 'subscription') {
         if (!input.period) throw new ApiError(400, 'INVALID_REQUEST', 'A subscription needs its period');
         // One subscription group per app (its own plan and Hearth+).
-        let group = list(await asc.get<Doc>(`/v1/apps/${appStoreId}/subscriptionGroups?limit=50`))[0];
+        // The app's group: the one that already has subscriptions, else the first.
+        const groups = await asc.get<Doc>(`/v1/apps/${appStoreId}/subscriptionGroups?include=subscriptions&limit=50&limit[subscriptions]=50`);
+        let group = list(groups).find((item) => relation(item, 'subscriptions').length > 0) ?? list(groups)[0];
         if (!group) {
           group = list(await asc.send<Doc>('POST', '/v1/subscriptionGroups', {
             data: { type: 'subscriptionGroups', attributes: { referenceName: appName }, relationships: { app: { data: { type: 'apps', id: appStoreId } } } },

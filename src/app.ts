@@ -87,6 +87,8 @@ import { createMonetization, revenueCatReader } from './studio/monetization.js';
 import type { MonetizationBackend } from './studio/monetization.js';
 import { createStoreProducts, revenueCatClient } from './studio/storeProducts.js';
 import type { StoreProducts } from './studio/storeProducts.js';
+import { createPlanStore } from './studio/monetizationPlans.js';
+import type { PlanStore } from './studio/monetizationPlans.js';
 import { createGitHubApps } from './studio/github.js';
 import type { GitHubApps } from './studio/github.js';
 import { createStudioNotifier } from './studio/notify.js';
@@ -132,7 +134,7 @@ export type AppOptions = {
   /** Hearth Studio (/v1/studio, /v1/library). Built from DATABASE_URL, Supabase storage, REVENUECAT_*, GITHUB_APP_* and APNS_* when not given. */
   studio?: {
     team?: TeamService; library?: LibraryService; storage?: StudioStorage; documents?: DocumentsService;
-    plans?: PlansBackend; apps?: GitHubApps; notifier?: StudioNotifier; sql?: Sql; monetization?: MonetizationBackend; storeProducts?: StoreProducts;
+    plans?: PlansBackend; apps?: GitHubApps; notifier?: StudioNotifier; sql?: Sql; monetization?: MonetizationBackend; storeProducts?: StoreProducts; planDefinitions?: PlanStore;
   };
   /** Affiliates and campaign links. Built from DATABASE_URL, SOCIAL_TOKEN_KEY and ASC_* when not given. */
   affiliates?: { service?: AffiliateService; links?: LinkService; importStats?: (team: string) => Promise<unknown> };
@@ -404,6 +406,11 @@ export function createApp(options: AppOptions = {}) {
     apps: () => options.studio?.apps ?? githubAppsFromConfig(config, options.fetcher ?? fetch),
     monetization: () => options.studio?.monetization ?? (sharedMonetization ??= monetizationFromConfig(config, options.studio?.apps ?? githubAppsFromConfig(config, options.fetcher ?? fetch), options.fetcher ?? fetch)),
     storeProducts: () => options.studio?.storeProducts ?? (sharedStoreProducts ??= storeProductsFromConfig(config, options.fetcher ?? fetch)),
+    planDefinitions: () => {
+      if (options.studio?.planDefinitions) return options.studio.planDefinitions;
+      const sql = options.studio?.sql ?? database;
+      return sql ? createPlanStore(sql) : undefined;
+    },
     sql: () => options.studio?.sql ?? database,
   });
 

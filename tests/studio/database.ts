@@ -11,9 +11,11 @@ export const STUDIO_MIGRATIONS = [
   '20261029180000_studio_member_avatars.sql',
   '20261029200000_affiliates_and_links.sql',
   '20261029220000_studio_admin_role.sql',
+  '20261029230000_monetization_plans.sql',
 ];
 
 export const STUDIO_TABLES = [
+  'monetization_plans',
   'asc_report_requests', 'campaign_stats_daily', 'link_taps_daily', 'campaign_links', 'affiliate_flags', 'affiliate_credits',
   'affiliate_payouts', 'affiliate_attributions', 'affiliate_invites', 'affiliate_codes', 'affiliates',
   'library_assets', 'library_runs', 'marketing_campaigns', 'store_designs',

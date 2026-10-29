@@ -6,13 +6,13 @@ import { createStoreProducts } from '../../src/studio/storeProducts.js';
 import type { RevenueCatClient } from '../../src/studio/storeProducts.js';
 
 // A small App Store Connect: one app with one subscription (no metadata yet) and a lifetime purchase.
-function fakeAsc(options: { versions?: boolean } = {}) {
+function fakeAsc(options: { versions?: boolean; state?: string } = {}) {
   const calls: { method: string; path: string; body?: unknown }[] = [];
   const localizations: Record<string, { id: string; name: string; description?: string }> = {};
   const routes: Record<string, unknown> = {
     '/v1/apps/111/subscriptionGroups?include=subscriptions&limit=50&limit[subscriptions]=50': {
       data: [{ id: 'g1', attributes: { referenceName: 'BigTable' }, relationships: { subscriptions: { data: [{ id: 's1' }] } } }],
-      included: [{ id: 's1', type: 'subscriptions', attributes: { name: 'Plus Monthly', productId: 'bt.plus.monthly', state: 'MISSING_METADATA', subscriptionPeriod: 'ONE_MONTH', familySharable: true } }],
+      included: [{ id: 's1', type: 'subscriptions', attributes: { name: 'Plus Monthly', productId: 'bt.plus.monthly', state: options.state ?? 'MISSING_METADATA', subscriptionPeriod: 'ONE_MONTH', familySharable: true } }],
     },
     '/v1/apps/111/subscriptionGroups?limit=50': { data: [{ id: 'g1', attributes: { referenceName: 'BigTable' } }] },
     '/v1/apps/111/inAppPurchasesV2?limit=200': { data: [{ id: 'i1', attributes: { name: 'Lifetime', productId: 'bt.hearthplus.lifetime', state: 'MISSING_METADATA' } }] },
@@ -153,7 +153,12 @@ describe('Store products', () => {
     expect(rc.posts[0]!.body).toMatchObject({ store_identifier: 'bt.plus.monthly', app_id: 'app1', type: 'subscription' });
 
     const taken = fakeRevenueCat([{ id: 'prodPro', app_id: 'app1', store_identifier: 'bt.pro.monthly' }]);
-    const takenAsc = fakeAsc();
+    // Not approved yet: it can't take over the live paywall at all.
+    const unapproved = createStoreProducts({ asc: fakeAsc().asc, revenueCat: taken.client });
+    await expect(unapproved.save('111', 'com.bigtable', 'bt.plus.monthly', { package: '$rc_monthly', replaceInPackage: true })).rejects.toMatchObject({ status: 422, code: 'NOT_APPROVED' });
+    expect(taken.posts).toEqual([]);
+
+    const takenAsc = fakeAsc({ state: 'APPROVED' });
     const products = createStoreProducts({ asc: takenAsc.asc, revenueCat: taken.client });
     // Found before anything is written: nothing half-saved.
     await expect(products.save('111', 'com.bigtable', 'bt.plus.monthly', { package: '$rc_monthly', priceUSD: '4.99' })).rejects.toMatchObject({ status: 409, code: 'PACKAGE_TAKEN' });

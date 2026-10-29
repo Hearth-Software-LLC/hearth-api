@@ -142,6 +142,22 @@ describe.skipIf(!url)('Hearth Studio (Postgres)', () => {
     expect((await call('kristen', 'GET', '/v1/studio/me')).status).toBe(403);
   });
 
+  it('keeps plan definitions with versions, and only admins change them', async () => {
+    const definition = { monthly: { price: '4.99', trial: 'ONE_WEEK' }, annual: { price: '39.99' }, unlocks: 'Meal plans and imports.' };
+    const created = await call('steve', 'PUT', '/v1/studio/monetization/plans/bigtable', { definition, version: 0 });
+    expect(created.status).toBe(200);
+    expect(created.body).toMatchObject({ scope: 'bigtable', version: 1, definition });
+    expect((await call('steve', 'PUT', '/v1/studio/monetization/plans/bigtable', { definition, version: 0 })).status).toBe(409);
+    expect((await call('steve', 'PUT', '/v1/studio/monetization/plans/hearth', { definition: { lifetime: { price: '249' } }, version: 0 })).status).toBe(200);
+    expect((await call('steve', 'PUT', '/v1/studio/monetization/plans/hearth', { definition: { monthly: { price: 'free' } }, version: 1 })).status).toBe(400);
+    const listed = await call('steve', 'GET', '/v1/studio/monetization/plans');
+    expect(listed.body.plans.map((plan: { scope: string }) => plan.scope)).toEqual(['bigtable', 'hearth']);
+
+    await call('kristen', 'POST', `/v1/studio/invites/${await invite({ plans: true })}/join`, {});
+    expect((await call('kristen', 'GET', '/v1/studio/monetization/plans')).status).toBe(200);
+    expect((await call('kristen', 'PUT', '/v1/studio/monetization/plans/bigtable', { definition, version: 1 })).body.error.code).toBe('PERMISSION_REQUIRED');
+  });
+
   it('checks permissions on social routes too', async () => {
     await call('kristen', 'POST', `/v1/studio/invites/${await invite({ post: false })}/join`, {});
     const denied = await call('kristen', 'POST', '/v1/social/connections/meta/start', { app: 'hearth' });
