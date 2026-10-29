@@ -44,7 +44,12 @@ export function createAscClient(credentials: AscCredentials, fetcher: Fetch = fe
     const response = await fetcher(path.startsWith('http') ? path : `${API}${path}`, {
       ...init, headers: { authorization: `Bearer ${await bearer()}`, 'content-type': 'application/json', ...(init.headers ?? {}) },
     });
-    if (!response.ok) throw new Error(`App Store Connect ${init.method ?? 'GET'} ${path.split('?')[0]} answered ${response.status}`);
+    if (!response.ok) {
+      // Apple's first error detail, when there is one (never the token or the request body).
+      const detail = await response.json().then((body: { errors?: { detail?: string; title?: string }[] }) => body.errors?.[0]?.detail ?? body.errors?.[0]?.title, () => undefined);
+      const where = path.replace(API, '').split('?')[0];
+      throw new Error(`App Store Connect ${init.method ?? 'GET'} ${where} answered ${response.status}${detail ? `: ${detail}` : ''}`);
+    }
     return (await response.json()) as T;
   }
 
@@ -62,6 +67,9 @@ export function createAscClient(credentials: AscCredentials, fetcher: Fetch = fe
   }
 
   return {
+    /** Any GET, for other features that read App Store Connect (Studio's Monetization tab). */
+    get: <T = { data: unknown }>(path: string) => call<T>(path),
+    all,
     async requestReports(appStoreId: string) {
       const created = await call<{ data: { id: string } }>('/v1/analyticsReportRequests', {
         method: 'POST',

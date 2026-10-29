@@ -13,6 +13,7 @@ import { LIBRARY_KINDS, LIBRARY_TYPES } from './library.js';
 import type { LibraryService } from './library.js';
 import { planKey } from './plans.js';
 import type { PlansBackend } from './plans.js';
+import type { MonetizationBackend } from './monetization.js';
 import type { Member, TeamService } from './team.js';
 
 /**
@@ -26,6 +27,8 @@ export type StudioDependencies = {
   documents: () => DocumentsService | undefined;
   plans: () => PlansBackend | undefined;
   apps: () => GitHubApps | undefined;
+  /** Store › Monetization: App Store Connect and RevenueCat, read-only. */
+  monetization: () => MonetizationBackend | undefined;
   /** For the grant log. */
   sql: () => Sql | undefined;
 };
@@ -238,6 +241,19 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
       result.push({ ...rest, iconAssetId, iconUrl });
     }
     return context.json({ apps: result }, 200);
+  });
+
+  // MARK: Monetization
+
+  app.openapi(route('Studio monetization', {
+    method: 'get', path: '/v1/studio/monetization',
+    summary: 'Every app’s plans: App Store Connect products (US price, trial, review state) and how RevenueCat sells them',
+    request: { query: z.object({ refresh: z.enum(['true', 'false']).default('false') }) },
+    responses: { 200: anyJson('Apps and their products'), ...errors },
+  }), async (context) => {
+    need(context, 'plans');
+    const backend = required(dependencies.monetization, 'Monetization (ASC_KEY_ID, ASC_ISSUER_ID, ASC_PRIVATE_KEY or REVENUECAT_SECRET_API_KEY)');
+    return context.json(await backend.overview(context.req.valid('query').refresh === 'true'), 200);
   });
 
   // MARK: Plans
