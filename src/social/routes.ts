@@ -372,22 +372,30 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
   const seriesSchema = z.object({ platform: z.string(), metric, points: z.array(z.object({ day: z.string(), value: z.number() })) });
   app.openapi(route({
     method: 'get', path: `${prefix}/analytics`, summary: 'An app’s numbers over the last 7, 28 or 90 days, with the period before for comparison',
-    request: { query: appQuery.extend({ days: z.coerce.number().int().refine((value) => [7, 28, 90].includes(value)).default(28) }) },
+    request: { query: appQuery.extend({
+      days: z.coerce.number().int().refine((value) => [7, 28, 90].includes(value)).default(28),
+      platform: platform.optional().openapi({ description: 'Only this platform’s numbers (all of them when left out)' }),
+    }) },
     responses: { 200: json(z.object({
       days: z.number().int(),
+      platforms: z.array(platform).openapi({ description: 'The platforms with numbers or posts in this period or the one before, whatever `platform` is' }),
       totals: z.array(z.object({ metric, value: z.number(), previous: z.number().nullable() })),
       series: z.array(seriesSchema),
       posts: z.array(z.object({ target: targetSchema, metrics: z.record(z.string(), z.number()) })),
     }).openapi('SocialAnalytics'), 'Numbers'), ...errors },
   }), async (context) => {
     const { store } = service();
-    const { app: appId, days } = context.req.valid('query');
+    const { app: appId, days, platform: only } = context.req.valid('query');
     const owner = me(context);
     const end = Date.now();
     const start = new Date(end - days * 86_400_000).toISOString();
     const before = new Date(end - 2 * days * 86_400_000).toISOString();
     const [rows, posts] = await Promise.all([store.metrics(owner, appId, before.slice(0, 10)), store.publishedTargets(owner, appId, before)]);
-    return context.json(analytics(rows, posts, days, start.slice(0, 10)), 200);
+    const platforms = SOCIAL_PLATFORMS.filter((id) => rows.some((row) => row.platform === id) || posts.some((post) => post.platform === id));
+    const numbers = only
+      ? analytics(rows.filter((row) => row.platform === only), posts.filter((post) => post.platform === only), days, start.slice(0, 10))
+      : analytics(rows, posts, days, start.slice(0, 10));
+    return context.json({ ...numbers, platforms }, 200);
   });
 
   app.openapi(route({
