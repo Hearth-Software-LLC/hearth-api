@@ -18,6 +18,15 @@ export type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 const API = 'https://api.appstoreconnect.apple.com';
 
+/** An App Store Connect error answer, with its HTTP status. */
+export class AscError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
 /** The detailed reports that carry the Campaign column. */
 export const CAMPAIGN_REPORTS = [
   'App Store Discovery and Engagement Detailed',
@@ -41,15 +50,22 @@ export function createAscClient(credentials: AscCredentials, fetcher: Fetch = fe
   }
 
   async function call<T = { data: unknown }>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await fetcher(path.startsWith('http') ? path : `${API}${path}`, {
-      ...init, headers: { authorization: `Bearer ${await bearer()}`, 'content-type': 'application/json', ...(init.headers ?? {}) },
-    });
+    let response: Response;
+    // Apple rate-limits per key: wait and try again, twice.
+    for (let attempt = 0; ; attempt++) {
+      response = await fetcher(path.startsWith('http') ? path : `${API}${path}`, {
+        ...init, headers: { authorization: `Bearer ${await bearer()}`, 'content-type': 'application/json', ...(init.headers ?? {}) },
+      });
+      if (response.status !== 429 || attempt >= 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 2_000 * (attempt + 1)));
+    }
     if (!response.ok) {
       // Apple's first error detail, when there is one (never the token or the request body).
       const detail = await response.json().then((body: { errors?: { detail?: string; title?: string }[] }) => body.errors?.[0]?.detail ?? body.errors?.[0]?.title, () => undefined);
       const where = path.replace(API, '').split('?')[0];
-      throw new Error(`App Store Connect ${init.method ?? 'GET'} ${where} answered ${response.status}${detail ? `: ${detail}` : ''}`);
+      throw new AscError(`App Store Connect ${init.method ?? 'GET'} ${where} answered ${response.status}${detail ? `: ${detail}` : ''}`, response.status);
     }
+    if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   }
 
@@ -69,6 +85,9 @@ export function createAscClient(credentials: AscCredentials, fetcher: Fetch = fe
   return {
     /** Any GET, for other features that read App Store Connect (Studio's Monetization tab). */
     get: <T = { data: unknown }>(path: string) => call<T>(path),
+    /** POST, PATCH or DELETE with a JSON:API body (DELETE answers nothing). */
+    send: <T = { data: unknown }>(method: 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown) =>
+      call<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }),
     all,
     async requestReports(appStoreId: string) {
       const created = await call<{ data: { id: string } }>('/v1/analyticsReportRequests', {

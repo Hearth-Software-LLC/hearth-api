@@ -10,6 +10,7 @@ export const STUDIO_MIGRATIONS = [
   '20261029120000_library_one_version.sql',
   '20261029180000_studio_member_avatars.sql',
   '20261029200000_affiliates_and_links.sql',
+  '20261029220000_studio_admin_role.sql',
 ];
 
 export const STUDIO_TABLES = [

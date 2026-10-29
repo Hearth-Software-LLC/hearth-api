@@ -37,13 +37,14 @@ const what: Record<Permission, string> = {
   plans: 'grant plans',
   accounts: 'connect social accounts',
   affiliates: 'manage affiliates and payouts',
+  monetization: 'publish paywalls or edit store products',
   owner: 'manage the team',
 };
 
 export function need(context: AnyContext, permission: Permission): Member {
   const member = memberOf(context);
   if (!can(member, permission)) {
-    throw new ApiError(403, 'PERMISSION_REQUIRED', `Your place on the team doesn’t let you ${what[permission]}. Ask Steve to turn it on.`);
+    throw new ApiError(403, 'PERMISSION_REQUIRED', `Your place on the team doesn’t let you ${what[permission]}. Ask Steve to turn it on${permission === 'monetization' ? ' (it needs the Admin role)' : ''}.`);
   }
   return member;
 }

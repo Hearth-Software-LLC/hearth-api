@@ -85,6 +85,8 @@ import { createRevenueCatPlans } from './studio/plans.js';
 import type { PlansBackend } from './studio/plans.js';
 import { createMonetization, revenueCatReader } from './studio/monetization.js';
 import type { MonetizationBackend } from './studio/monetization.js';
+import { createStoreProducts, revenueCatClient } from './studio/storeProducts.js';
+import type { StoreProducts } from './studio/storeProducts.js';
 import { createGitHubApps } from './studio/github.js';
 import type { GitHubApps } from './studio/github.js';
 import { createStudioNotifier } from './studio/notify.js';
@@ -130,7 +132,7 @@ export type AppOptions = {
   /** Hearth Studio (/v1/studio, /v1/library). Built from DATABASE_URL, Supabase storage, REVENUECAT_*, GITHUB_APP_* and APNS_* when not given. */
   studio?: {
     team?: TeamService; library?: LibraryService; storage?: StudioStorage; documents?: DocumentsService;
-    plans?: PlansBackend; apps?: GitHubApps; notifier?: StudioNotifier; sql?: Sql; monetization?: MonetizationBackend;
+    plans?: PlansBackend; apps?: GitHubApps; notifier?: StudioNotifier; sql?: Sql; monetization?: MonetizationBackend; storeProducts?: StoreProducts;
   };
   /** Affiliates and campaign links. Built from DATABASE_URL, SOCIAL_TOKEN_KEY and ASC_* when not given. */
   affiliates?: { service?: AffiliateService; links?: LinkService; importStats?: (team: string) => Promise<unknown> };
@@ -401,6 +403,7 @@ export function createApp(options: AppOptions = {}) {
     plans: () => options.studio?.plans ?? (sharedPlans ??= createRevenueCatPlans(process.env, options.fetcher ?? fetch)),
     apps: () => options.studio?.apps ?? githubAppsFromConfig(config, options.fetcher ?? fetch),
     monetization: () => options.studio?.monetization ?? (sharedMonetization ??= monetizationFromConfig(config, options.studio?.apps ?? githubAppsFromConfig(config, options.fetcher ?? fetch), options.fetcher ?? fetch)),
+    storeProducts: () => options.studio?.storeProducts ?? (sharedStoreProducts ??= storeProductsFromConfig(config, options.fetcher ?? fetch)),
     sql: () => options.studio?.sql ?? database,
   });
 
@@ -562,6 +565,13 @@ const supabaseLibraryStorage: StudioStorage = {
 let sharedDocuments: DocumentsService | undefined;
 let sharedPlans: PlansBackend | undefined;
 let sharedMonetization: MonetizationBackend | undefined;
+let sharedStoreProducts: StoreProducts | undefined;
+
+function storeProductsFromConfig(config: Config, fetcher: typeof fetch): StoreProducts | undefined {
+  if (!config.ASC_KEY_ID || !config.ASC_ISSUER_ID || !config.ASC_PRIVATE_KEY) return undefined;
+  const asc = createAscClient({ keyId: config.ASC_KEY_ID, issuerId: config.ASC_ISSUER_ID, privateKey: config.ASC_PRIVATE_KEY }, fetcher);
+  return createStoreProducts({ asc, revenueCat: revenueCatClient(revenueCatReader(process.env, fetcher), process.env, fetcher) });
+}
 
 /** App Store Connect (ASC_*) and RevenueCat (REVENUECAT_*), either or both; neither: not configured. */
 function monetizationFromConfig(config: Config, apps: GitHubApps | undefined, fetcher: typeof fetch): MonetizationBackend | undefined {

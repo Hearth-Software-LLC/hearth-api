@@ -10,13 +10,17 @@ import { isUniqueViolation, newInviteCode } from '../hearken/service.js';
  * sees one of them, so there's nothing to set up by hand.
  */
 
-export type Permission = 'post' | 'plans' | 'accounts' | 'affiliates' | 'owner';
+/** `monetization`: publish paywalls and edit store products (owners and admins only). `owner`: manage the team. */
+export type Permission = 'post' | 'plans' | 'accounts' | 'affiliates' | 'monetization' | 'owner';
+
+/** Owners manage the team; admins can do everything else; members do what their switches allow. */
+export type Role = 'owner' | 'admin' | 'member';
 
 export type Member = {
   teamId: string;
   teamName: string;
   userId: string;
-  role: 'owner' | 'member';
+  role: Role;
   canPost: boolean;
   canPlans: boolean;
   canAccounts: boolean;
@@ -34,6 +38,8 @@ export type Member = {
 export function can(member: Member, permission: Permission): boolean {
   if (member.role === 'owner') return true;
   if (permission === 'owner') return false;
+  if (member.role === 'admin') return true;
+  if (permission === 'monetization') return false;
   if (permission === 'affiliates') return member.canAffiliates;
   return permission === 'post' ? member.canPost : permission === 'plans' ? member.canPlans : member.canAccounts;
 }
@@ -86,7 +92,7 @@ export function createTeamService(sql: Sql, options: { ownerIds: string[]; now?:
     },
 
     async members(teamId: string): Promise<Member[]> {
-      const rows = await sql`${select} where m.team_id = ${teamId} order by m.role desc, m.added_at`;
+      const rows = await sql`${select} where m.team_id = ${teamId} order by case m.role when 'owner' then 0 when 'admin' then 1 else 2 end, m.added_at`;
       return rows.map(member);
     },
 
@@ -106,9 +112,15 @@ export function createTeamService(sql: Sql, options: { ownerIds: string[]; now?:
       return row ? { id: String(row.id), slug: String(row.slug), name: String(row.name), keepRuns: Number(row.keep_runs) } : undefined;
     },
 
-    async updateMember(teamId: string, userId: string, patch: { canPost?: boolean; canPlans?: boolean; canAccounts?: boolean; canAffiliates?: boolean; displayName?: string | null }) {
+    async updateMember(teamId: string, userId: string, patch: { role?: 'admin' | 'member'; canPost?: boolean; canPlans?: boolean; canAccounts?: boolean; canAffiliates?: boolean; displayName?: string | null }) {
+      if (patch.role) {
+        const [target] = await sql`select role from studio_members where team_id = ${teamId} and user_id = ${userId}`;
+        if (!target) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Member not found');
+        if (target.role === 'owner') throw new ApiError(409, 'OWNER', 'An owner’s role can’t be changed here');
+      }
       const [row] = await sql`
         update studio_members set
+          role = coalesce(${patch.role ?? null}, role),
           can_post = coalesce(${patch.canPost ?? null}, can_post),
           can_plans = coalesce(${patch.canPlans ?? null}, can_plans),
           can_accounts = coalesce(${patch.canAccounts ?? null}, can_accounts),

@@ -54,7 +54,7 @@ export type MonetizationOverview = {
 
 type SourceState = 'ok' | 'not_configured' | 'failed';
 
-export type MonetizationBackend = { overview: (refresh?: boolean) => Promise<MonetizationOverview> };
+export type MonetizationBackend = { overview: (refresh?: boolean) => Promise<MonetizationOverview>; invalidate: () => void };
 
 type Item = { id: string; type?: string; attributes?: Record<string, unknown>; relationships?: Record<string, { data?: { id: string; type?: string } | { id: string; type?: string }[] | null }> };
 type Doc = { data: Item[] | Item; included?: Item[]; links?: { next?: string } };
@@ -342,7 +342,6 @@ export function createMonetization(options: {
           product.packages = packages.filter((row) => row.storeId === product.productId).map(({ offering, package: name, current }) => ({ offering, package: name, current }));
           product.entitlements = [...new Set(entitlements.filter((row) => row.storeId === product.productId).map((row) => row.key))].sort();
           product.inRevenueCat = product.packages.length > 0 || product.entitlements.length > 0;
-          if (product.kind === 'subscription' && !product.inRevenueCat && rcApp) app.problems.push(`${product.productId} isn’t in any RevenueCat offering or entitlement.`);
         }
         if (rcApp) {
           const onlyInRc = new Set(packages.filter((row) => row.appId === rcApp.id && !app.products.some((product) => product.productId === row.storeId)).map((row) => row.storeId));
@@ -371,6 +370,7 @@ export function createMonetization(options: {
   }
 
   return {
+    invalidate() { cache = undefined; },
     async overview(refresh = false) {
       if (!refresh && cache && now().getTime() - cache.at < cacheMs) return cache.value;
       running ??= build().finally(() => { running = undefined; });

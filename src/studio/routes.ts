@@ -14,6 +14,9 @@ import type { LibraryService } from './library.js';
 import { planKey } from './plans.js';
 import type { PlansBackend } from './plans.js';
 import type { MonetizationBackend } from './monetization.js';
+import { DESCRIPTION_LIMIT, DISPLAY_NAME_LIMIT, PERIODS, TRIALS } from './storeProducts.js';
+import type { StoreProducts } from './storeProducts.js';
+import { can } from './team.js';
 import type { Member, TeamService } from './team.js';
 
 /**
@@ -29,6 +32,8 @@ export type StudioDependencies = {
   apps: () => GitHubApps | undefined;
   /** Store › Monetization: App Store Connect and RevenueCat, read-only. */
   monetization: () => MonetizationBackend | undefined;
+  /** Creating and finishing products in App Store Connect and RevenueCat (admins). */
+  storeProducts: () => StoreProducts | undefined;
   /** For the grant log. */
   sql: () => Sql | undefined;
 };
@@ -57,7 +62,10 @@ const ok = { ok: true as const };
 
 const memberView = (member: Member) => ({
   userId: member.userId, role: member.role, displayName: member.displayName,
-  permissions: { post: member.role === 'owner' || member.canPost, plans: member.role === 'owner' || member.canPlans, accounts: member.role === 'owner' || member.canAccounts, affiliates: member.role === 'owner' || member.canAffiliates },
+  permissions: {
+    post: can(member, 'post'), plans: can(member, 'plans'), accounts: can(member, 'accounts'), affiliates: can(member, 'affiliates'),
+    monetization: can(member, 'monetization'), team: can(member, 'owner'),
+  },
   notifications: { due: member.notifyDue, comments: member.notifyComments, failed: member.notifyFailed },
   addedAt: member.addedAt,
 });
@@ -148,16 +156,16 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
   });
 
   app.openapi(route('Studio team', {
-    method: 'patch', path: '/v1/studio/members/{userId}', summary: 'What a member can do (owners only)',
+    method: 'patch', path: '/v1/studio/members/{userId}', summary: 'A member’s role (admin or member) and what they can do (owners only)',
     request: {
       params: z.object({ userId: uuid.openapi({ param: { name: 'userId', in: 'path' } }) }),
-      ...body(z.object({ post: z.boolean().optional(), plans: z.boolean().optional(), accounts: z.boolean().optional(), affiliates: z.boolean().optional() }).strict()),
+      ...body(z.object({ role: z.enum(['admin', 'member']).optional(), post: z.boolean().optional(), plans: z.boolean().optional(), accounts: z.boolean().optional(), affiliates: z.boolean().optional() }).strict()),
     },
     responses: { 200: anyJson('Member'), ...errors },
   }), async (context) => {
     const owner = need(context, 'owner');
     const input = context.req.valid('json');
-    const updated = await team().updateMember(owner.teamId, context.req.valid('param').userId, defined({ canPost: input.post, canPlans: input.plans, canAccounts: input.accounts, canAffiliates: input.affiliates }));
+    const updated = await team().updateMember(owner.teamId, context.req.valid('param').userId, defined({ role: input.role, canPost: input.post, canPlans: input.plans, canAccounts: input.accounts, canAffiliates: input.affiliates }));
     return context.json(await view(updated), 200);
   });
 
@@ -254,6 +262,105 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     need(context, 'plans');
     const backend = required(dependencies.monetization, 'Monetization (ASC_KEY_ID, ASC_ISSUER_ID, ASC_PRIVATE_KEY or REVENUECAT_SECRET_API_KEY)');
     return context.json(await backend.overview(context.req.valid('query').refresh === 'true'), 200);
+  });
+
+  // Products (admins): everything App Store Connect and RevenueCat need before a plan is on sale.
+  const productChanges = z.object({
+    referenceName: z.string().trim().min(1).max(64).optional(),
+    displayName: z.string().trim().min(1).max(DISPLAY_NAME_LIMIT).optional(),
+    description: z.string().trim().min(1).max(DESCRIPTION_LIMIT).optional(),
+    groupDisplayName: z.string().trim().min(1).max(DISPLAY_NAME_LIMIT).optional(),
+    familySharable: z.boolean().optional(),
+    reviewNote: z.string().trim().max(4000).optional(),
+    priceUSD: z.string().regex(/^\d{1,5}(\.\d{1,2})?$/).optional(),
+    soldIn: z.enum(['us', 'everywhere']).optional(),
+    trial: z.union([z.enum(TRIALS), z.literal('')]).optional(),
+    package: z.string().regex(/^[$A-Za-z0-9_.-]{1,200}$/).optional(),
+    replaceInPackage: z.boolean().optional(),
+    entitlement: z.string().regex(/^[A-Za-z0-9_.-]{1,200}$/).optional(),
+  }).strict();
+  const productParams = z.object({
+    app: appKey.openapi({ param: { name: 'app', in: 'path' } }),
+    productId: z.string().regex(/^[A-Za-z0-9._]{2,100}$/).openapi({ param: { name: 'productId', in: 'path' } }),
+  });
+  const products = () => required(dependencies.storeProducts, 'Store products (ASC_KEY_ID, ASC_ISSUER_ID, ASC_PRIVATE_KEY)');
+  const storeApp = async (key: string) => {
+    const overview = await required(dependencies.monetization, 'Monetization').overview();
+    const found = overview.apps.find((entry) => entry.key === key);
+    if (!found?.appStoreId) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'That app isn’t in App Store Connect');
+    return { appStoreId: found.appStoreId, bundleId: found.bundleId, name: found.name };
+  };
+
+  app.openapi(route('Studio monetization', {
+    method: 'get', path: '/v1/studio/monetization/{app}/products/{productId}', summary: 'A product as the editor shows it, with what’s still missing',
+    request: { params: productParams },
+    responses: { 200: anyJson('Product editor'), ...errors },
+  }), async (context) => {
+    need(context, 'monetization');
+    const { app: key, productId } = context.req.valid('param');
+    const target = await storeApp(key);
+    return context.json(await products().editor(target.appStoreId, target.bundleId, productId), 200);
+  });
+
+  app.openapi(route('Studio monetization', {
+    method: 'put', path: '/v1/studio/monetization/{app}/products/{productId}', summary: 'Save a product’s App Store Connect details and RevenueCat package and entitlement',
+    request: { params: productParams, ...body(productChanges) },
+    responses: { 200: anyJson('Product editor'), ...errors },
+  }), async (context) => {
+    need(context, 'monetization');
+    const { app: key, productId } = context.req.valid('param');
+    const target = await storeApp(key);
+    // The overview isn't invalidated here: Hearth+ saves go app by app, and the client refreshes it once at the end.
+    return context.json(await products().save(target.appStoreId, target.bundleId, productId, defined(context.req.valid('json'))), 200);
+  });
+
+  app.openapi(route('Studio monetization', {
+    method: 'post', path: '/v1/studio/monetization/{app}/products', summary: 'Create a subscription or one-time purchase, then save its details',
+    request: {
+      params: z.object({ app: appKey.openapi({ param: { name: 'app', in: 'path' } }) }),
+      ...body(z.object({
+        kind: z.enum(['subscription', 'non_consumable']),
+        productId: z.string().regex(/^[A-Za-z0-9._]{2,100}$/),
+        referenceName: z.string().trim().min(1).max(64),
+        period: z.enum(PERIODS).optional(),
+        changes: productChanges.default({}),
+      }).strict()),
+    },
+    responses: { 200: anyJson('Product editor'), ...errors },
+  }), async (context) => {
+    need(context, 'monetization');
+    const target = await storeApp(context.req.valid('param').app);
+    const input = context.req.valid('json');
+    return context.json(await products().create(target.appStoreId, target.name, target.bundleId, {
+      kind: input.kind, productId: input.productId, referenceName: input.referenceName,
+      ...(input.period ? { period: input.period } : {}), changes: defined(input.changes),
+    }), 200);
+  });
+
+  app.openapi(route('Studio monetization', {
+    method: 'post', path: '/v1/studio/monetization/{app}/products/{productId}/screenshot', summary: 'Reserve the App Review screenshot upload (the client PUTs the bytes to Apple)',
+    request: { params: productParams, ...body(z.object({ fileName: z.string().regex(/^[^/\\]{1,120}\.(png|jpe?g)$/i), fileSize: z.number().int().min(1).max(30_000_000) }).strict()) },
+    responses: { 200: anyJson('Upload operations'), ...errors },
+  }), async (context) => {
+    need(context, 'monetization');
+    const { app: key, productId } = context.req.valid('param');
+    const target = await storeApp(key);
+    const input = context.req.valid('json');
+    return context.json(await products().reserveScreenshot(target.appStoreId, productId, input.fileName, input.fileSize), 200);
+  });
+
+  app.openapi(route('Studio monetization', {
+    method: 'post', path: '/v1/studio/monetization/{app}/products/{productId}/screenshot/{id}/commit', summary: 'Finish the App Review screenshot upload',
+    request: {
+      params: productParams.extend({ id: z.string().regex(/^[A-Za-z0-9-]{1,100}$/).openapi({ param: { name: 'id', in: 'path' } }) }),
+      ...body(z.object({ checksum: z.string().regex(/^[0-9a-f]{32}$/) }).strict()),
+    },
+    responses: { 200: anyJson('Product editor'), ...errors },
+  }), async (context) => {
+    need(context, 'monetization');
+    const { app: key, productId, id } = context.req.valid('param');
+    const target = await storeApp(key);
+    return context.json(await products().commitScreenshot(target.appStoreId, target.bundleId, productId, id, context.req.valid('json').checksum), 200);
   });
 
   // MARK: Plans
