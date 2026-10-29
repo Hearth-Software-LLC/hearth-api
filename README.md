@@ -66,7 +66,12 @@ HEARKEN_TEST_DATABASE_URL=postgres://localhost/hearken_test npm test
 | `META_GRAPH_VERSION` | Graph API version; default `v24.0` |
 | `META_LOGIN_CONFIG_ID` | Facebook Login for Business configuration id (business-type Meta apps); replaces the scope list |
 | `SOCIAL_TOKEN_KEY` | 32-byte base64 key sealing the Pages' tokens (`openssl rand -base64 32`); separate from `PLAID_TOKEN_KEY` |
-| `SOCIAL_OWNER_IDS` | Hearth account ids (comma-separated) allowed to use `/v1/social` |
+| `SOCIAL_OWNER_IDS` | Hearth account ids (comma-separated): the owners of the Hearth Software team in Hearth Studio, unless `STUDIO_OWNER_IDS` is set |
+| `STUDIO_OWNER_IDS` | Optional: the team's owners, in place of `SOCIAL_OWNER_IDS`. Everyone else joins with an invite |
+| `STUDIO_STORAGE_LIMIT_MB` | The Library's storage budget (default 1000, Supabase Free's 1 GB). New uploads are refused past 90% |
+| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | The GitHub App (read-only Contents and Metadata, installed on `GITHUB_ORG`) that lists the Hearth apps for Hearth Studio. The key is the .pem's text |
+| `GITHUB_ORG` | Default `Hearth-Software-LLC` |
+| `STUDIO_APNS_TOPIC` | Hearth Studio's push topic (default `com.stephenwarren.hearthstudio`); pushes use the `APNS_*` key |
 
 ## Account deletion
 

@@ -134,17 +134,30 @@ The request carries the app's App Store listing, the campaign brief, audience an
 
 Hearth Ship signs in with `scripts/dev-session.ts` (`npm run dev-session`), which makes a one-time magic link with the secret key and redeems it at once, for an account chosen from Test Plans. It grants nothing beyond what holding the secret key already does.
 
-### Social pages for Hearth Ship
+### Social pages for Hearth Studio
 
-`/v1/social/*` lets Hearth Ship run the Hearth apps' own social accounts (`src/social`): posts (drafts, scheduled, published), an inbox of comments, and numbers. Only the accounts in `SOCIAL_OWNER_IDS` can use it.
+`/v1/social/*` lets Hearth Studio (Mac, iPhone, iPad) run Hearth Software's own social accounts (`src/social`): posts (drafts, scheduled, published), an inbox of comments, and numbers. Everything belongs to the caller's team (see Hearth Studio below), and connecting accounts or posting needs that permission.
 
 - **Facebook Pages and Instagram** go through Meta's Graph API (`meta.ts`). `POST /v1/social/connections/meta/start` returns a Facebook login link; `GET /oauth/meta/callback` swaps the code for a long-lived token, saves every Page the login manages (and its linked Instagram account) with its Page token sealed by `SOCIAL_TOKEN_KEY`, and sends the browser to `hearthship://social/connected`. The Meta app stays in development mode: the people with a role on it can use every permission on their own Pages without App Review.
 - **Every other platform is hand-off.** Hearth Ship prepares the post, you post it in the platform's app, then `POST /v1/social/targets/{id}/posted` records its link. Their numbers arrive as CSV exports that Hearth Ship reads and sends to `POST /v1/social/metrics/import`.
 - **Publishing:** "Post now" is a schedule of now. The request publishes what it can (an Instagram video still processing after 20 seconds stays `processing`); pg_cron calls `GET /internal/social/cron` every 5 minutes (`20261029000100_social_pages_media_and_cron.sql`, with `CRON_SECRET` in Vault as `hearth_api_cron_secret`) to publish what's due, finish processing videos, and sync posts and comments (every 15 minutes) and numbers (every 6 hours). A target is claimed before it's published, so two runs can't post it twice.
-- **Media** lives in the private `social-media` bucket: `POST /v1/social/media` gives Hearth Ship a signed upload URL, and Meta fetches each file from a signed URL when the post goes out.
+- **Media** lives in the private `social-media` bucket: `POST /v1/social/media` gives Hearth Studio a signed upload URL, and Meta fetches each file from a signed URL when the post goes out. A post can also use a Library file, as `library/<team>/...`.
 - **Reply suggestions:** `POST /v1/social/comments/{id}/suggest` asks Claude for three replies (Hearth+, `marketing` quota), with the comment, its thread and the post's text.
 
 Tables: `social_connections`, `social_posts`, `social_targets` (one per account a post goes to, plus posts found on an account), `social_comments`, `social_metrics` (by day; a post's are its totals as of that day). Tests: `SOCIAL_TEST_DATABASE_URL=postgres://localhost/social_test npm test`.
+
+### Hearth Studio
+
+`/v1/studio/*` and `/v1/library/*` (`src/studio`) are the rest of Hearth Studio. Every call works as the caller's team (`gate.ts`): `SOCIAL_OWNER_IDS` (or `STUDIO_OWNER_IDS`) are the Hearth Software team's owners, and anyone else is let in with an invite. Members have three permissions: post (posts, replies, the Library, campaigns, designs), plans, and accounts (connecting social accounts).
+
+- **Team** (`team.ts`): `GET/PATCH /v1/studio/me` (name, which pushes), `GET /v1/studio/members`, owners' `PATCH/DELETE /v1/studio/members/{userId}` and `POST /v1/studio/invites` (8 characters, a week, one use), and `POST /v1/studio/invites/{code}/join`. `POST/DELETE /v1/studio/devices` registers APNs tokens.
+- **Plans** (`plans.ts`): `GET /v1/studio/accounts?search=`, `GET /v1/studio/accounts/{id}`, `PUT` and `DELETE /v1/studio/accounts/{id}/plans/{plan}`. These are `scripts/set-entitlements.ts` as an API: RevenueCat grants, then the `subscriptions` row is rewritten. Bought plans can't be removed (409 `PLAN_BOUGHT`). Every change is in `plan_grants_log`.
+- **The Library** (`library.ts`): screenshots, mockups, ad images, uploads and app icons in the private `library` bucket, at `<team>/<app>/<kind>/<sha256>.<ext>`, so a file is stored once. Uploading is `POST /v1/library/uploads` (a signed upload URL, or `exists`), a PUT to it, then `POST /v1/library/assets`. Clients sync with `GET /v1/library/assets?since=<cursor>`; deletions come through as `deleted: true`. Screenshot runs (`POST /v1/library/runs`, then `/complete`) keep the team's last `keep_runs` (2) per app, device and appearance. Older ones are removed unless a post, campaign or design uses them. `GET /v1/library/usage` reports storage use.
+- **Campaigns and designs** (`documents.ts`): ad campaigns and Store Studio designs are JSON documents with a version. Saving sends the version it was based on, and a stale save answers 409 with the current one.
+- **Apps** (`github.ts`): `GET /v1/studio/apps` lists the repos in `GITHUB_ORG` that have a `hearth-app.json` (`key`, `name`, `accent`, `icon`, `appStoreId`, `bundleId`), through a GitHub App, cached for 10 minutes. Each icon is copied into the Library.
+- **Pushes** (`notify.ts`): the social cron also pushes due hand-off posts, posts that failed, and new comments (one push for a batch) to the members who want each.
+
+Tables: `studio_teams`, `studio_members`, `studio_invites`, `plan_grants_log`, `studio_devices`, `library_runs`, `library_assets`, `marketing_campaigns`, `store_designs` (`20261029100000_studio_team.sql`, `20261029100100_studio_library.sql`). Tests: the same `SOCIAL_TEST_DATABASE_URL`.
 
 ### Food Data Providers
 

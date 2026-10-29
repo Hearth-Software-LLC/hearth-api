@@ -56,7 +56,7 @@ export function createSocialService(options: SocialServiceOptions) {
     return options.media;
   }
 
-  const tokenOf = (connection: StoredConnection) => seal.open(connection.tokenSealed, connection.ownerId, `${connection.platform}:${connection.externalId}`);
+  const tokenOf = (connection: StoredConnection) => seal.open(connection.tokenSealed, connection.connectedBy, `${connection.platform}:${connection.externalId}`);
   const metaTarget = (connection: StoredConnection): MetaTarget => ({ platform: connection.platform, externalId: connection.externalId, token: tokenOf(connection) });
 
   // MARK: Login state
@@ -67,15 +67,15 @@ export function createSocialService(options: SocialServiceOptions) {
     return `${body}.${mac}`;
   }
 
-  function readState(state: string): { owner: string; app: string | null } {
+  function readState(state: string): { owner: string; user: string; app: string | null } {
     const [body, mac] = state.split('.');
     if (!body || !mac) throw new ApiError(400, 'INVALID_STATE', 'The sign-in link is invalid');
     const expected = createHmac('sha256', options.stateKey).update(`meta-login:${body}`).digest();
     const given = Buffer.from(mac, 'base64url');
     if (given.length !== expected.length || !timingSafeEqual(given, expected)) throw new ApiError(400, 'INVALID_STATE', 'The sign-in link is invalid');
-    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as { o?: string; a?: string | null; e?: number };
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as { o?: string; u?: string; a?: string | null; e?: number };
     if (!payload.o || !payload.e || payload.e < now()) throw new ApiError(400, 'INVALID_STATE', 'The sign-in link has expired; start again');
-    return { owner: payload.o, app: payload.a ?? null };
+    return { owner: payload.o, user: payload.u ?? payload.o, app: payload.a ?? null };
   }
 
   // MARK: Publishing
@@ -196,14 +196,15 @@ export function createSocialService(options: SocialServiceOptions) {
   return {
     metaConfigured: () => options.meta !== undefined,
 
-    startMetaLogin(owner: string, app: string | null): string {
-      const state = signState({ o: owner, a: app, e: now() + 15 * 60_000, n: randomBytes(9).toString('base64url') });
+    /** `owner` is the team; `user` is whoever logs in (the Page tokens are sealed to them). */
+    startMetaLogin(owner: string, user: string, app: string | null): string {
+      const state = signState({ o: owner, u: user, a: app, e: now() + 15 * 60_000, n: randomBytes(9).toString('base64url') });
       return requireMeta().authorizeUrl(state);
     },
 
     /** The login's redirect: saves every Page and Instagram account it can post as. */
     async finishMetaLogin(code: string, state: string) {
-      const { owner, app } = readState(state);
+      const { owner, user, app } = readState(state);
       const meta = requireMeta();
       const userToken = await meta.exchangeCode(code);
       const accounts = await meta.accounts(userToken);
@@ -221,7 +222,7 @@ export function createSocialService(options: SocialServiceOptions) {
       for (const account of accounts) {
         await store.saveConnection(owner, {
           platform: account.platform, externalId: account.externalId, name: account.name, handle: account.handle, avatarUrl: account.avatarUrl,
-          app: assign, tokenSealed: seal.seal(account.token, owner, `${account.platform}:${account.externalId}`),
+          app: assign, connectedBy: user, tokenSealed: seal.seal(account.token, user, `${account.platform}:${account.externalId}`),
         });
       }
       return { owner, count: accounts.length };

@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import postgres from 'postgres';
 import { createApp } from '../../src/app.js';
@@ -7,6 +6,8 @@ import { analytics } from '../../src/social/routes.js';
 import type { MetaClient } from '../../src/social/meta.js';
 import type { SocialMedia } from '../../src/social/service.js';
 import { createSocialStore } from '../../src/social/store.js';
+import { createTeamService } from '../../src/studio/team.js';
+import { migrate, reset } from '../studio/database.js';
 
 // The analytics math runs everywhere; the routes run against a real Postgres: set
 // SOCIAL_TEST_DATABASE_URL (or HEARKEN_TEST_DATABASE_URL) to an empty scratch database.
@@ -82,23 +83,18 @@ describe('social analytics', () => {
 
 describe.skipIf(!url)('social pages (Postgres)', () => {
   let sql: postgres.Sql;
+  let release: (() => Promise<void>) | undefined;
   let meta: ReturnType<typeof fakeMeta>;
   let app: ReturnType<typeof createApp>;
 
   beforeAll(async () => {
-    sql = postgres(url!, { max: 2, onnotice: () => undefined });
-    await sql.unsafe('drop table if exists social_metrics, social_comments, social_targets, social_posts, social_connections cascade');
-    const reserved = await sql.reserve();
-    try {
-      await reserved.unsafe(readFileSync(new URL('../../supabase/migrations/20261029000000_social_pages.sql', import.meta.url), 'utf8'));
-    } finally {
-      reserved.release();
-    }
+    sql = postgres(url!, { max: 4, onnotice: () => undefined });
+    release = await migrate(sql);
   });
-  afterAll(async () => { await sql?.end(); });
+  afterAll(async () => { await release?.(); await sql?.end(); });
 
   beforeEach(async () => {
-    await sql`truncate social_metrics, social_comments, social_targets, social_posts, social_connections cascade`;
+    await reset(sql);
     meta = fakeMeta();
     app = createApp({
       config: readConfig({ SOCIAL_TOKEN_KEY: key, SOCIAL_OWNER_IDS: steve, CRON_SECRET: 'cron-secret-cron-secret' }),
@@ -106,6 +102,7 @@ describe.skipIf(!url)('social pages (Postgres)', () => {
       reserveQuota: async () => undefined,
       entitlements: async () => [],
       social: { store: createSocialStore(sql), meta: meta as unknown as MetaClient, media },
+      studio: { team: createTeamService(sql, { ownerIds: [steve] }) },
     });
   });
 
@@ -161,7 +158,8 @@ describe.skipIf(!url)('social pages (Postgres)', () => {
   it('posts now to Facebook, leaves Instagram video processing for the cron, and keeps hand-off targets for you', async () => {
     const [facebook, instagram] = await connect();
     const upload = await call('steve', 'POST', '/v1/social/media', { extension: 'mp4' });
-    expect(upload.body.path).toMatch(new RegExp(`^${steve}/`));
+    const [team] = await sql`select id from studio_teams where slug = 'hearth'`;
+    expect(upload.body.path).toMatch(new RegExp(`^${team!.id}/`));
     const created = await call('steve', 'POST', '/v1/social/posts', {
       app: 'hearth', about: 'sated', text: 'New in Sated', media: [{ path: upload.body.path, kind: 'video' }], draft: false, firstComment: '#food',
       targets: [

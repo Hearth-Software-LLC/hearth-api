@@ -67,6 +67,19 @@ import { createSocialStore } from './social/store.js';
 import type { SocialStore } from './social/store.js';
 import { createMetaClient } from './social/meta.js';
 import type { MetaClient } from './social/meta.js';
+import { registerStudio } from './studio/routes.js';
+import { createTeamService } from './studio/team.js';
+import type { TeamService } from './studio/team.js';
+import { createLibraryService } from './studio/library.js';
+import type { LibraryService, StudioStorage } from './studio/library.js';
+import { createDocumentsService } from './studio/documents.js';
+import type { DocumentsService } from './studio/documents.js';
+import { createRevenueCatPlans } from './studio/plans.js';
+import type { PlansBackend } from './studio/plans.js';
+import { createGitHubApps } from './studio/github.js';
+import type { GitHubApps } from './studio/github.js';
+import { createStudioNotifier } from './studio/notify.js';
+import type { StudioNotifier } from './studio/notify.js';
 
 export type AppOptions = {
   config?: Config;
@@ -105,6 +118,11 @@ export type AppOptions = {
   emberTranscribe?: Partial<EmberTranscribeDependencies>;
   /** Hearth Ship's social pages (/v1/social). Built from DATABASE_URL, SOCIAL_TOKEN_KEY and META_* when not given. */
   social?: { store?: SocialStore; service?: SocialService; meta?: MetaClient; media?: SocialMedia };
+  /** Hearth Studio (/v1/studio, /v1/library). Built from DATABASE_URL, Supabase storage, REVENUECAT_*, GITHUB_APP_* and APNS_* when not given. */
+  studio?: {
+    team?: TeamService; library?: LibraryService; storage?: StudioStorage; documents?: DocumentsService;
+    plans?: PlansBackend; apps?: GitHubApps; notifier?: StudioNotifier; sql?: Sql;
+  };
 };
 
 type RequestLog = {
@@ -344,16 +362,34 @@ export function createApp(options: AppOptions = {}) {
       media: options.social?.media ?? (config.SUPABASE_URL && config.SUPABASE_SECRET_KEY ? supabaseSocialMedia : undefined),
     })
     : undefined);
+  // Hearth Studio's team: who can use /v1/social, /v1/studio and /v1/library.
+  const studioOwners = config.STUDIO_OWNER_IDS.length > 0 ? config.STUDIO_OWNER_IDS : config.SOCIAL_OWNER_IDS;
+  const studioTeam = options.studio?.team ?? (database ? createTeamService(database, { ownerIds: studioOwners }) : undefined);
+  const studioStorage = options.studio?.storage ?? (config.SUPABASE_URL && config.SUPABASE_SECRET_KEY ? supabaseLibraryStorage : undefined);
+  const studioLibrary = options.studio?.library ?? (database
+    ? createLibraryService(database, { storage: studioStorage, limitBytes: config.STUDIO_STORAGE_LIMIT_MB * 1024 * 1024 })
+    : undefined);
+  const studioNotifier = options.studio?.notifier ?? (database && studioTeam ? createStudioNotifier(database, studioTeam, apnsFromConfig(config)) : undefined);
   registerSocial(app, {
     config,
     store: socialStore,
     service: socialService,
-    owners: config.SOCIAL_OWNER_IDS,
+    team: () => studioTeam,
+    notifier: () => studioNotifier,
     reserveQuota,
     requireHearthPlus: createHearthPlusGate(config.ENFORCE_ENTITLEMENTS, entitlementSource),
     anthropicApiKey: process.env.ANTHROPIC_API_KEY?.trim() || undefined,
     model: process.env.MARKETING_MODEL?.trim() || undefined,
     fetcher: options.fetcher ?? fetch,
+  });
+
+  registerStudio(app, {
+    team: () => studioTeam,
+    library: () => studioLibrary,
+    documents: () => options.studio?.documents ?? (database ? (sharedDocuments ??= createDocumentsService(database)) : undefined),
+    plans: () => options.studio?.plans ?? (sharedPlans ??= createRevenueCatPlans(process.env, options.fetcher ?? fetch)),
+    apps: () => options.studio?.apps ?? githubAppsFromConfig(config, options.fetcher ?? fetch),
+    sql: () => options.studio?.sql ?? database,
   });
 
   // DELETE /v1/me and DELETE /v1/bigtable/me share one deletion, which needs these.
@@ -443,8 +479,46 @@ const supabaseSocialMedia: SocialMedia = {
     return { url: data.signedUrl, token: data.token };
   },
   async signedUrl(path, seconds) {
-    const { data, error } = await supabaseAdmin.storage.from('social-media').createSignedUrl(path, seconds);
+    // A Library item picked for a post: library/<team>/... lives in the library bucket.
+    const [bucket, key] = path.startsWith('library/') ? ['library', path.slice('library/'.length)] : ['social-media', path];
+    const { data, error } = await supabaseAdmin.storage.from(bucket).createSignedUrl(key, seconds);
     if (error || !data) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Post media is temporarily unavailable');
     return data.signedUrl;
   },
 };
+
+/** The Library's files in the private library bucket (supabase/migrations/20261029100100_studio_library.sql). */
+const supabaseLibraryStorage: StudioStorage = {
+  async uploadUrl(path) {
+    const { data, error } = await supabaseAdmin.storage.from('library').createSignedUploadUrl(path, { upsert: true });
+    if (error || !data) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Library uploads are temporarily unavailable');
+    return { url: data.signedUrl, token: data.token };
+  },
+  async signedUrl(path, seconds) {
+    const { data, error } = await supabaseAdmin.storage.from('library').createSignedUrl(path, seconds);
+    if (error || !data) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'The Library is temporarily unavailable');
+    return data.signedUrl;
+  },
+  async remove(paths) {
+    if (paths.length === 0) return;
+    for (let index = 0; index < paths.length; index += 100) {
+      const { error } = await supabaseAdmin.storage.from('library').remove(paths.slice(index, index + 100));
+      if (error) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Library files could not be removed');
+    }
+  },
+  async put(path, bytes, contentType) {
+    const { error } = await supabaseAdmin.storage.from('library').upload(path, bytes, { contentType, upsert: true });
+    if (error) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'The Library could not store the file');
+  },
+};
+
+let sharedDocuments: DocumentsService | undefined;
+let sharedPlans: PlansBackend | undefined;
+let sharedGitHubApps: GitHubApps | undefined;
+
+/** One GitHub App client per process (it caches its token and the app list). */
+function githubAppsFromConfig(config: Config, fetcher: typeof fetch): GitHubApps | undefined {
+  if (!config.GITHUB_APP_ID || !config.GITHUB_APP_PRIVATE_KEY) return undefined;
+  sharedGitHubApps ??= createGitHubApps({ appId: config.GITHUB_APP_ID, privateKey: config.GITHUB_APP_PRIVATE_KEY, org: config.GITHUB_ORG }, fetcher);
+  return sharedGitHubApps;
+}

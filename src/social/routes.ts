@@ -14,6 +14,9 @@ import type { SocialService } from './service.js';
 import { publicConnection, SOCIAL_PLATFORMS } from './store.js';
 import type { MetricRow, PostView, SocialStore, TargetView } from './store.js';
 import { suggestReplies } from './suggest-reply.js';
+import { need, studioMiddleware, teamOf } from '../studio/gate.js';
+import type { TeamService } from '../studio/team.js';
+import type { StudioNotifier } from '../studio/notify.js';
 
 // MARK: Schemas
 
@@ -102,8 +105,10 @@ export type SocialRouteDependencies = {
   config: Config;
   service: SocialService | undefined;
   store: SocialStore | undefined;
-  /** Hearth accounts allowed to use /v1/social (SOCIAL_OWNER_IDS). */
-  owners: string[];
+  /** The Hearth Software team: who can use /v1/social, and with which permissions. */
+  team: () => TeamService | undefined;
+  /** Hearth Studio's pushes, run by the cron. */
+  notifier?: () => StudioNotifier | undefined;
   reserveQuota: ReserveQuota;
   requireHearthPlus: (userId: string) => Promise<void>;
   anthropicApiKey?: string | undefined;
@@ -120,18 +125,14 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     return { service: dependencies.service, store: dependencies.store };
   };
 
-  app.use(`${prefix}/*`, async (context, next) => {
-    if (!dependencies.owners.includes(context.get('userId'))) {
-      throw new ApiError(403, 'SOCIAL_NOT_ALLOWED', 'This account can’t manage the Hearth apps’ pages. Add its id to SOCIAL_OWNER_IDS on hearth-api.');
-    }
-    await next();
-  });
+  app.use(`${prefix}/*`, studioMiddleware(dependencies.team));
   app.use(`${prefix}/*`, async (context, next) => bodyLimit({
     maxSize: context.req.path === `${prefix}/metrics/import` ? 4_000_000 : 128_000,
     onError: () => { throw new ApiError(400, 'INVALID_REQUEST', 'Request body is too large'); },
   })(context, next));
 
-  const me = (context: { get: (key: 'userId') => string }) => context.get('userId');
+  /** The caller's team: everything in /v1/social is the team's. */
+  const me = (context: Parameters<typeof teamOf>[0]) => teamOf(context);
 
   async function withPreviews(post: PostView) {
     const { service: social } = service();
@@ -156,7 +157,8 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     responses: { 200: json(z.object({ url: z.string() }), 'Open this in a web authentication session'), ...errors },
   }), async (context) => {
     const { service: social } = service();
-    return context.json({ url: social.startMetaLogin(me(context), context.req.valid('json').app ?? null) }, 200);
+    const member = need(context, 'accounts');
+    return context.json({ url: social.startMetaLogin(member.teamId, member.userId, context.req.valid('json').app ?? null) }, 200);
   });
 
   app.openapi(route({
@@ -165,6 +167,7 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     responses: { 200: json(connectionSchema, 'The connection'), ...errors },
   }), async (context) => {
     const { store } = service();
+    need(context, 'accounts');
     const updated = await store.setConnectionApp(me(context), context.req.valid('param').id, context.req.valid('json').app);
     if (!updated) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Connection not found');
     return context.json(publicConnection(updated), 200);
@@ -176,6 +179,7 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     responses: { 200: json(ok, 'Disconnected'), ...errors },
   }), async (context) => {
     const { store } = service();
+    need(context, 'accounts');
     if (!await store.removeConnection(me(context), context.req.valid('param').id)) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Connection not found');
     return context.json({ ok: true as const }, 200);
   });
@@ -188,6 +192,7 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     responses: { 200: json(z.object({ path: z.string(), uploadUrl: z.string(), token: z.string() }), 'Upload target'), ...errors },
   }), async (context) => {
     const { service: social } = service();
+    need(context, 'post');
     return context.json(await social.uploadUrl(me(context), context.req.valid('json').extension), 200);
   });
 
@@ -207,7 +212,10 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
   async function savePost(owner: string, input: z.infer<typeof postBody>, id?: string) {
     const { service: social, store } = service();
     for (const item of input.media) {
-      if (!item.path.startsWith(`${owner}/`)) throw new ApiError(422, 'INVALID_MEDIA', 'Upload media with POST /v1/social/media first');
+      // Uploaded for the post, or a Library item (library/<team>/...).
+      if (!item.path.startsWith(`${owner}/`) && !item.path.startsWith(`library/${owner}/`)) {
+        throw new ApiError(422, 'INVALID_MEDIA', 'Upload media with POST /v1/social/media first, or pick it from the Library');
+      }
     }
     // Post now is a schedule of now, so the cron picks up anything the request doesn't finish.
     const scheduledFor = input.draft ? (input.scheduledFor ?? null) : (input.scheduledFor ?? new Date().toISOString());
@@ -227,7 +235,10 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     summary: 'A new post: a draft, scheduled, or (draft false, no scheduledFor) posted now to its Facebook and Instagram targets',
     request: body(postBody),
     responses: { 201: json(postSchema, 'The post, with each target’s status'), ...errors },
-  }), async (context) => context.json(await withPreviews(await savePost(me(context), context.req.valid('json'))), 201));
+  }), async (context) => {
+    need(context, 'post');
+    return context.json(await withPreviews(await savePost(me(context), context.req.valid('json'))), 201);
+  });
 
   app.openapi(route({
     method: 'put', path: `${prefix}/posts/{id}`, summary: 'Replace a post (targets already published stay as they are)',
@@ -236,6 +247,7 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
   }), async (context) => {
     const { store } = service();
     const { id } = context.req.valid('param');
+    need(context, 'post');
     const existing = await store.post(me(context), id);
     if (!existing) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Post not found');
     if (existing.app !== context.req.valid('json').app) throw new ApiError(422, 'INVALID_REQUEST', 'A post can’t move to another app');
@@ -248,6 +260,7 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     responses: { 200: json(ok, 'Deleted'), ...errors },
   }), async (context) => {
     const { store } = service();
+    need(context, 'post');
     if (!await store.removePost(me(context), context.req.valid('param').id)) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Post not found');
     return context.json({ ok: true as const }, 200);
   });
@@ -259,6 +272,7 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
   }), async (context) => {
     const { service: social, store } = service();
     const { id } = context.req.valid('param');
+    need(context, 'post');
     await social.retryTarget(me(context), id);
     const { ownerId: _owner, ...view } = (await store.target(me(context), id))!;
     return context.json(view, 200);
@@ -272,6 +286,7 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     const { service: social, store } = service();
     const { id } = context.req.valid('param');
     const input = context.req.valid('json');
+    need(context, 'post');
     if (input.posted === false) await social.markNotPosted(me(context), id);
     else await social.markPosted(me(context), id, input.permalink ?? null, input.publishedAt ?? null);
     const { ownerId: _owner, ...view } = (await store.target(me(context), id))!;
@@ -305,6 +320,7 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     responses: { 200: json(ok, 'Replied'), ...errors },
   }), async (context) => {
     const { service: social } = service();
+    need(context, 'post');
     await social.reply(me(context), context.req.valid('param').id, context.req.valid('json').text);
     return context.json({ ok: true as const }, 200);
   });
@@ -317,6 +333,7 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     const { service: social, store } = service();
     const { id } = context.req.valid('param');
     const { status } = context.req.valid('json');
+    need(context, 'post');
     const existing = await store.comment(me(context), id);
     if (!existing) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Comment not found');
     if (status === 'hidden' || existing.status === 'hidden') await social.hide(me(context), id, status === 'hidden');
@@ -330,12 +347,13 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     responses: { 200: json(z.object({ replies: z.array(z.string()) }), 'Suggestions'), 402: json(errorSchema, 'Needs Hearth+'), 429: json(errorSchema, 'Too many requests'), ...errors },
   }), async (context) => {
     const { store } = service();
-    const owner = me(context);
-    await dependencies.requireHearthPlus(owner);
+    const owner = need(context, 'post').teamId;
+    const userId = context.get('userId');
+    await dependencies.requireHearthPlus(userId);
     if (!dependencies.anthropicApiKey) throw new ApiError(503, 'PROVIDER_NOT_CONFIGURED', 'Reply suggestions are not configured');
     const comment = await store.comment(owner, context.req.valid('param').id);
     if (!comment) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'Comment not found');
-    await dependencies.reserveQuota(owner, 'marketing');
+    await dependencies.reserveQuota(userId, 'marketing');
     const thread = (await store.comments(owner, comment.app, 'all', 500))
       .filter((item) => item.id !== comment.id && (item.remoteId === comment.parentRemoteId || (comment.parentRemoteId && item.parentRemoteId === comment.parentRemoteId)))
       .reverse().slice(-6).map((item) => `${item.fromAccount ? 'You' : item.author}: ${item.text}`);
@@ -380,7 +398,7 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
   }), async (context) => {
     const { store } = service();
     const input = context.req.valid('json');
-    const owner = me(context);
+    const owner = need(context, 'post').teamId;
     if (isApiPlatform(input.platform) && input.posts?.length) {
       // Facebook and Instagram posts come from the API; imported rows only add numbers to them.
     } else if (input.posts?.length) {
@@ -415,7 +433,14 @@ export function registerSocial(app: OpenAPIHono<ApiEnvironment>, dependencies: S
   app.get('/internal/social/cron', async (context) => {
     requireCronSecret(dependencies.config, context.req.header('Authorization'));
     const { service: social } = service();
-    return context.json(await social.cron(), 200);
+    const result = await social.cron();
+    // Hearth Studio's pushes (due hand-offs, failures, new comments) ride the same five minutes.
+    const notifier = dependencies.notifier?.();
+    const pushed = notifier ? await notifier.run().catch((error: unknown) => {
+      console.error('Studio notifications failed', { message: error instanceof Error ? error.message : String(error) });
+      return 0;
+    }) : 0;
+    return context.json({ ...result, pushed }, 200);
   });
 }
 

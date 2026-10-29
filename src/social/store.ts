@@ -26,7 +26,8 @@ export type ConnectionView = {
   metricsSyncedAt: string | null;
   createdAt: string;
 };
-export type StoredConnection = ConnectionView & { ownerId: string; tokenSealed: string };
+/** `ownerId` is the team; the token is sealed to `connectedBy`, the person whose login connected it. */
+export type StoredConnection = ConnectionView & { ownerId: string; connectedBy: string; tokenSealed: string };
 
 export type TargetView = {
   id: string;
@@ -124,7 +125,7 @@ const num = (value: unknown) => (value == null ? null : Number(value));
 
 function connection(row: Row): StoredConnection {
   return {
-    id: String(row.id), ownerId: String(row.owner_id), platform: row.platform as MetaPlatform, externalId: String(row.external_id),
+    id: String(row.id), ownerId: String(row.team_id), connectedBy: String(row.connected_by), platform: row.platform as MetaPlatform, externalId: String(row.external_id),
     name: String(row.name), handle: (row.handle as string | null) ?? null, avatarUrl: (row.avatar_url as string | null) ?? null,
     app: (row.app as string | null) ?? null, status: row.status as ConnectionView['status'], lastError: (row.last_error as string | null) ?? null,
     postsSyncedAt: iso(row.posts_synced_at), metricsSyncedAt: iso(row.metrics_synced_at), createdAt: iso(row.created_at)!,
@@ -133,13 +134,13 @@ function connection(row: Row): StoredConnection {
 }
 
 export function publicConnection(stored: StoredConnection): ConnectionView {
-  const { ownerId: _owner, tokenSealed: _token, ...view } = stored;
+  const { ownerId: _owner, connectedBy: _by, tokenSealed: _token, ...view } = stored;
   return view;
 }
 
 function target(row: Row): StoredTarget {
   return {
-    id: String(row.id), ownerId: String(row.owner_id), postId: (row.post_id as string | null) ?? null, app: String(row.app),
+    id: String(row.id), ownerId: String(row.team_id), postId: (row.post_id as string | null) ?? null, app: String(row.app),
     platform: row.platform as SocialPlatformId, connectionId: (row.connection_id as string | null) ?? null,
     delivery: row.delivery as TargetView['delivery'], format: row.format as TargetFormat, text: (row.text as string | null) ?? null,
     status: row.status as TargetStatus, scheduledFor: iso(row.scheduled_for), attempts: Number(row.attempts ?? 0),
@@ -157,7 +158,7 @@ export function publicTarget(stored: StoredTarget): TargetView {
 
 function comment(row: Row): CommentView & { ownerId: string } {
   return {
-    id: String(row.id), ownerId: String(row.owner_id), connectionId: String(row.connection_id), app: String(row.app),
+    id: String(row.id), ownerId: String(row.team_id), connectionId: String(row.connection_id), app: String(row.app),
     platform: row.platform as MetaPlatform, remoteId: String(row.remote_id), remotePostId: String(row.remote_post_id),
     parentRemoteId: (row.parent_remote_id as string | null) ?? null, author: String(row.author), text: String(row.text),
     likeCount: Number(row.like_count ?? 0), fromAccount: row.from_account === true, status: row.status as CommentView['status'],
@@ -189,30 +190,30 @@ export function createSocialStore(sql: Sql) {
     // MARK: Connections
 
     async connections(owner: string): Promise<StoredConnection[]> {
-      const rows = await sql`select * from social_connections where owner_id = ${owner} order by app nulls last, platform, name`;
+      const rows = await sql`select * from social_connections where team_id = ${owner} order by app nulls last, platform, name`;
       return rows.map(connection);
     },
 
     async connection(owner: string, id: string): Promise<StoredConnection | undefined> {
-      const [row] = await sql`select * from social_connections where owner_id = ${owner} and id = ${id}`;
+      const [row] = await sql`select * from social_connections where team_id = ${owner} and id = ${id}`;
       return row ? connection(row) : undefined;
     },
 
     /** Saves an account from a login; an account seen before keeps its app. */
-    async saveConnection(owner: string, input: { platform: MetaPlatform; externalId: string; name: string; handle: string | null; avatarUrl: string | null; app: string | null; tokenSealed: string }) {
+    async saveConnection(owner: string, input: { platform: MetaPlatform; externalId: string; name: string; handle: string | null; avatarUrl: string | null; app: string | null; tokenSealed: string; connectedBy: string }) {
       const [row] = await sql`
-        insert into social_connections (owner_id, platform, external_id, name, handle, avatar_url, app, token_sealed)
-        values (${owner}, ${input.platform}, ${input.externalId}, ${input.name.slice(0, 200)}, ${input.handle}, ${input.avatarUrl}, ${input.app}, ${input.tokenSealed})
-        on conflict (owner_id, platform, external_id) do update set
+        insert into social_connections (team_id, connected_by, platform, external_id, name, handle, avatar_url, app, token_sealed)
+        values (${owner}, ${input.connectedBy}, ${input.platform}, ${input.externalId}, ${input.name.slice(0, 200)}, ${input.handle}, ${input.avatarUrl}, ${input.app}, ${input.tokenSealed})
+        on conflict (team_id, platform, external_id) do update set
           name = excluded.name, handle = excluded.handle, avatar_url = excluded.avatar_url,
-          app = coalesce(social_connections.app, excluded.app), token_sealed = excluded.token_sealed,
+          app = coalesce(social_connections.app, excluded.app), token_sealed = excluded.token_sealed, connected_by = excluded.connected_by,
           status = 'active', last_error = null, updated_at = now()
         returning *`;
       return connection(row!);
     },
 
     async setConnectionApp(owner: string, id: string, app: string | null) {
-      const [row] = await sql`update social_connections set app = ${app}, updated_at = now() where owner_id = ${owner} and id = ${id} returning *`;
+      const [row] = await sql`update social_connections set app = ${app}, updated_at = now() where team_id = ${owner} and id = ${id} returning *`;
       return row ? connection(row) : undefined;
     },
 
@@ -228,7 +229,7 @@ export function createSocialStore(sql: Sql) {
     },
 
     async removeConnection(owner: string, id: string) {
-      const rows = await sql`delete from social_connections where owner_id = ${owner} and id = ${id} returning id`;
+      const rows = await sql`delete from social_connections where team_id = ${owner} and id = ${id} returning id`;
       return rows.length > 0;
     },
 
@@ -241,25 +242,25 @@ export function createSocialStore(sql: Sql) {
     // MARK: Posts
 
     async posts(owner: string, app: string): Promise<PostView[]> {
-      const rows = await sql`select * from social_posts where owner_id = ${owner} and app = ${app} order by coalesce(scheduled_for, updated_at) desc limit 300`;
+      const rows = await sql`select * from social_posts where team_id = ${owner} and app = ${app} order by coalesce(scheduled_for, updated_at) desc limit 300`;
       return postsWithTargets(rows);
     },
 
     async post(owner: string, id: string): Promise<PostView | undefined> {
-      const rows = await sql`select * from social_posts where owner_id = ${owner} and id = ${id}`;
+      const rows = await sql`select * from social_posts where team_id = ${owner} and id = ${id}`;
       return (await postsWithTargets(rows))[0];
     },
 
     async createPost(owner: string, input: PostInput, targets: TargetInput[]): Promise<string> {
       return sql.begin(async (tx) => {
         const [row] = await tx`
-          insert into social_posts (owner_id, app, about, text, link, first_comment, media, draft, scheduled_for)
+          insert into social_posts (team_id, app, about, text, link, first_comment, media, draft, scheduled_for)
           values (${owner}, ${input.app}, ${input.about}, ${input.text}, ${input.link}, ${input.firstComment}, ${tx.json(input.media)}, ${input.draft}, ${input.scheduledFor})
           returning id`;
         const id = String(row!.id);
         for (const item of targets) {
           await tx`
-            insert into social_targets (owner_id, post_id, app, platform, connection_id, delivery, format, text, status, scheduled_for)
+            insert into social_targets (team_id, post_id, app, platform, connection_id, delivery, format, text, status, scheduled_for)
             values (${owner}, ${id}, ${input.app}, ${item.platform}, ${item.connectionId}, ${item.delivery}, ${item.format}, ${item.text}, ${item.status}, ${item.scheduledFor})`;
         }
         return id;
@@ -272,28 +273,28 @@ export function createSocialStore(sql: Sql) {
         await tx`
           update social_posts set about = ${input.about}, text = ${input.text}, link = ${input.link}, first_comment = ${input.firstComment},
             media = ${tx.json(input.media)}, draft = ${input.draft}, scheduled_for = ${input.scheduledFor}, updated_at = now()
-          where owner_id = ${owner} and id = ${id}`;
+          where team_id = ${owner} and id = ${id}`;
         const kept = await tx`select platform, connection_id from social_targets where post_id = ${id} and status in ('published', 'publishing', 'processing')`;
         await tx`delete from social_targets where post_id = ${id} and status not in ('published', 'publishing', 'processing')`;
         const keptKeys = new Set(kept.map((row) => `${row.platform}/${row.connection_id ?? ''}`));
         for (const item of targets) {
           if (keptKeys.has(`${item.platform}/${item.connectionId ?? ''}`)) continue;
           await tx`
-            insert into social_targets (owner_id, post_id, app, platform, connection_id, delivery, format, text, status, scheduled_for)
+            insert into social_targets (team_id, post_id, app, platform, connection_id, delivery, format, text, status, scheduled_for)
             values (${owner}, ${id}, ${input.app}, ${item.platform}, ${item.connectionId}, ${item.delivery}, ${item.format}, ${item.text}, ${item.status}, ${item.scheduledFor})`;
         }
       });
     },
 
     async removePost(owner: string, id: string) {
-      const rows = await sql`delete from social_posts where owner_id = ${owner} and id = ${id} returning id`;
+      const rows = await sql`delete from social_posts where team_id = ${owner} and id = ${id} returning id`;
       return rows.length > 0;
     },
 
     // MARK: Targets
 
     async target(owner: string, id: string): Promise<StoredTarget | undefined> {
-      const [row] = await sql`select * from social_targets where owner_id = ${owner} and id = ${id}`;
+      const [row] = await sql`select * from social_targets where team_id = ${owner} and id = ${id}`;
       return row ? target(row) : undefined;
     },
 
@@ -324,7 +325,7 @@ export function createSocialStore(sql: Sql) {
     async dueTargets(limit = 20, owner?: string): Promise<StoredTarget[]> {
       const rows = await sql`
         select * from social_targets
-        where delivery = 'api' and (${owner ?? null}::uuid is null or owner_id = ${owner ?? null}::uuid) and (
+        where delivery = 'api' and (${owner ?? null}::uuid is null or team_id = ${owner ?? null}::uuid) and (
           (status = 'scheduled' and scheduled_for <= now())
           or status = 'processing'
           or (status = 'publishing' and updated_at < now() - interval '10 minutes'))
@@ -336,11 +337,11 @@ export function createSocialStore(sql: Sql) {
     async upsertRemotePosts(owner: string, app: string, platform: SocialPlatformId, connectionId: string | null, delivery: 'api' | 'handoff', posts: RemotePostUpsert[]) {
       for (const item of posts) {
         await sql`
-          insert into social_targets (owner_id, app, platform, connection_id, delivery, status, remote_id, permalink, published_at,
+          insert into social_targets (team_id, app, platform, connection_id, delivery, status, remote_id, permalink, published_at,
             preview_text, preview_media_url, like_count, comment_count, share_count)
           values (${owner}, ${app}, ${platform}, ${connectionId}, ${delivery}, 'published', ${item.remoteId}, ${item.permalink}, ${item.publishedAt},
             ${item.text.slice(0, 5000)}, ${item.mediaUrl?.slice(0, 4000) ?? null}, ${item.likes}, ${item.comments}, ${item.shares})
-          on conflict (owner_id, app, platform, remote_id) where remote_id is not null do update set
+          on conflict (team_id, app, platform, remote_id) where remote_id is not null do update set
             permalink = coalesce(excluded.permalink, social_targets.permalink),
             preview_text = excluded.preview_text,
             preview_media_url = coalesce(excluded.preview_media_url, social_targets.preview_media_url),
@@ -354,7 +355,7 @@ export function createSocialStore(sql: Sql) {
     /** Published posts on the app's accounts that weren't made in Hearth Ship. */
     async foundPosts(owner: string, app: string, limit = 200): Promise<TargetView[]> {
       const rows = await sql`
-        select * from social_targets where owner_id = ${owner} and app = ${app} and post_id is null
+        select * from social_targets where team_id = ${owner} and app = ${app} and post_id is null
         order by published_at desc nulls last limit ${limit}`;
       return rows.map((row) => publicTarget(target(row)));
     },
@@ -362,7 +363,7 @@ export function createSocialStore(sql: Sql) {
     /** Every published post of the app (made here or found), newest first. */
     async publishedTargets(owner: string, app: string, since: string): Promise<TargetView[]> {
       const rows = await sql`
-        select * from social_targets where owner_id = ${owner} and app = ${app} and status = 'published' and published_at >= ${since}
+        select * from social_targets where team_id = ${owner} and app = ${app} and status = 'published' and published_at >= ${since}
         order by published_at desc limit 500`;
       return rows.map((row) => publicTarget(target(row)));
     },
@@ -380,14 +381,14 @@ export function createSocialStore(sql: Sql) {
 
     async comments(owner: string, app: string, status: CommentView['status'] | 'all', limit = 200): Promise<CommentView[]> {
       const rows = await sql`
-        select * from social_comments where owner_id = ${owner} and app = ${app}
+        select * from social_comments where team_id = ${owner} and app = ${app}
           and (${status} = 'all' or status = ${status})
         order by commented_at desc limit ${limit}`;
       return rows.map((row) => { const { ownerId: _owner, ...view } = comment(row); return view; });
     },
 
     async comment(owner: string, id: string) {
-      const [row] = await sql`select * from social_comments where owner_id = ${owner} and id = ${id}`;
+      const [row] = await sql`select * from social_comments where team_id = ${owner} and id = ${id}`;
       return row ? comment(row) : undefined;
     },
 
@@ -396,9 +397,11 @@ export function createSocialStore(sql: Sql) {
       let added = 0;
       for (const item of items) {
         const rows = await sql`
-          insert into social_comments (owner_id, connection_id, app, platform, remote_id, remote_post_id, parent_remote_id, author, text, like_count, from_account, status, commented_at)
+          insert into social_comments (team_id, connection_id, app, platform, remote_id, remote_post_id, parent_remote_id, author, text, like_count, from_account, status, commented_at, notified_at)
           values (${owner}, ${connection.id}, ${connection.app ?? ''}, ${connection.platform}, ${item.remoteId}, ${remotePostId}, ${item.parentRemoteId},
-            ${item.author.slice(0, 200)}, ${item.text.slice(0, 5000)}, ${item.likes}, ${item.fromAccount}, ${item.fromAccount ? 'done' : 'open'}, ${item.at})
+            ${item.author.slice(0, 200)}, ${item.text.slice(0, 5000)}, ${item.likes}, ${item.fromAccount}, ${item.fromAccount ? 'done' : 'open'}, ${item.at},
+            -- Comments from before the account was connected (or a day old) don't push.
+            case when ${item.fromAccount} or ${item.at}::timestamptz < now() - interval '1 day' then now() end)
           on conflict (connection_id, remote_id) do update set text = excluded.text, like_count = excluded.like_count
           returning (xmax = 0) as inserted`;
         if (rows[0]?.inserted) added += 1;
@@ -407,7 +410,7 @@ export function createSocialStore(sql: Sql) {
     },
 
     async setCommentStatus(owner: string, id: string, status: CommentView['status']) {
-      const rows = await sql`update social_comments set status = ${status} where owner_id = ${owner} and id = ${id} returning id`;
+      const rows = await sql`update social_comments set status = ${status} where team_id = ${owner} and id = ${id} returning id`;
       return rows.length > 0;
     },
 
@@ -415,7 +418,7 @@ export function createSocialStore(sql: Sql) {
     async closeThread(owner: string, connectionId: string, rootRemoteId: string) {
       await sql`
         update social_comments set status = 'done'
-        where owner_id = ${owner} and connection_id = ${connectionId} and status = 'open'
+        where team_id = ${owner} and connection_id = ${connectionId} and status = 'open'
           and (remote_id = ${rootRemoteId} or parent_remote_id = ${rootRemoteId})`;
     },
 
@@ -424,9 +427,9 @@ export function createSocialStore(sql: Sql) {
     async saveMetrics(owner: string, app: string, rows: MetricRow[]) {
       for (const row of rows) {
         await sql`
-          insert into social_metrics (owner_id, app, platform, post_key, day, metric, value, source)
+          insert into social_metrics (team_id, app, platform, post_key, day, metric, value, source)
           values (${owner}, ${app}, ${row.platform}, ${row.postKey}, ${row.day}, ${row.metric}, ${row.value}, ${row.source})
-          on conflict (owner_id, app, platform, post_key, day, metric) do update set
+          on conflict (team_id, app, platform, post_key, day, metric) do update set
             value = excluded.value, source = excluded.source, updated_at = now()`;
       }
     },
@@ -434,7 +437,7 @@ export function createSocialStore(sql: Sql) {
     async metrics(owner: string, app: string, since: string): Promise<MetricRow[]> {
       const rows = await sql`
         select platform, post_key, day, metric, value, source from social_metrics
-        where owner_id = ${owner} and app = ${app} and (post_key <> '' or day >= ${since}::date)
+        where team_id = ${owner} and app = ${app} and (post_key <> '' or day >= ${since}::date)
         order by day`;
       return rows.map((row) => ({
         platform: String(row.platform), postKey: String(row.post_key), day: iso(row.day)!.slice(0, 10),
@@ -445,11 +448,11 @@ export function createSocialStore(sql: Sql) {
     /** Everything of one owner (account deletion). */
     async removeOwner(owner: string) {
       await sql.begin(async (tx) => {
-        await tx`delete from social_metrics where owner_id = ${owner}`;
-        await tx`delete from social_comments where owner_id = ${owner}`;
-        await tx`delete from social_targets where owner_id = ${owner}`;
-        await tx`delete from social_posts where owner_id = ${owner}`;
-        await tx`delete from social_connections where owner_id = ${owner}`;
+        await tx`delete from social_metrics where team_id = ${owner}`;
+        await tx`delete from social_comments where team_id = ${owner}`;
+        await tx`delete from social_targets where team_id = ${owner}`;
+        await tx`delete from social_posts where team_id = ${owner}`;
+        await tx`delete from social_connections where team_id = ${owner}`;
       });
     },
   };

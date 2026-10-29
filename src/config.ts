@@ -81,6 +81,15 @@ const configSchema = z.object({
   // The Hearth account ids (comma-separated) allowed to use /v1/social.
   SOCIAL_OWNER_IDS: z.string().transform((value) => value.split(',').map((entry) => entry.trim()).filter(Boolean))
     .pipe(z.array(z.uuid()).max(10)).prefault(''),
+  // Hearth Studio: the team's owners (defaults to SOCIAL_OWNER_IDS), the Library's storage
+  // budget (Supabase Free is 1 GB), the GitHub App that lists the apps, and the push topic.
+  STUDIO_OWNER_IDS: z.string().transform((value) => value.split(',').map((entry) => entry.trim()).filter(Boolean))
+    .pipe(z.array(z.uuid()).max(10)).prefault(''),
+  STUDIO_STORAGE_LIMIT_MB: z.coerce.number().int().min(50).max(1_000_000).default(1000),
+  GITHUB_APP_ID: z.string().trim().regex(/^\d{1,12}$/).optional(),
+  GITHUB_APP_PRIVATE_KEY: z.string().trim().includes('PRIVATE KEY').optional(),
+  GITHUB_ORG: z.string().trim().regex(/^[A-Za-z0-9-]{1,39}$/).default('Hearth-Software-LLC'),
+  STUDIO_APNS_TOPIC: z.string().trim().regex(/^[A-Za-z0-9.-]+$/).default('com.stephenwarren.hearthstudio'),
   // Vercel Cron sends it as a bearer token to /internal/* jobs.
   CRON_SECRET: z.string().trim().min(16).optional(),
   // Where links the API hands out point (study group invites).
@@ -101,6 +110,7 @@ const configSchema = z.object({
     ['FATSECRET_CLIENT_ID', 'FATSECRET_CLIENT_SECRET'] as const,
     ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY'] as const,
     ['META_APP_ID', 'META_APP_SECRET'] as const,
+    ['GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY'] as const,
   ]) {
     const count = group.filter((name) => config[name] !== undefined).length;
     if (count > 0 && count < group.length) {
