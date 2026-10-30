@@ -483,7 +483,7 @@ export function buildBundle(options: {
   entryId: string; app: string; typeSlug: string; slug: string; title: string; version: number; schemaVersion: number;
   publishedAt: string; body: Body; media: Map<string, MediaFile>;
   /** The type's definition, to find image fields. */
-  definition?: Pick<TypeDefinition, 'fields' | 'sections'> | null;
+  definition?: Pick<TypeDefinition, 'fields' | 'sections'> | null | undefined;
 }) {
   const resolve = (block: Block) => {
     if (block.type !== 'image') return block;
