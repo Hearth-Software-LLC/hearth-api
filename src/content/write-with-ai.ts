@@ -66,6 +66,34 @@ const appOf = (key: string) => APPS[key] ?? { name: key.charAt(0).toUpperCase() 
 
 type TypeLike = Pick<ContentTypeView, 'app' | 'name' | 'description' | 'definition'>;
 
+/**
+ * Hearken's learning module carries the fields its imported subjects need to rebuild a Scholar Path
+ * (stages, courses, the capstone, numbering). They mean nothing outside that structure, and a
+ * model filling them in made Hearken file every lesson under a path that doesn't exist. Claude
+ * never sees them; a written module is a plain subject of lessons.
+ */
+const HEARKEN_PATH_FIELDS = new Set([
+  'subjectId', 'order', 'pathTitle', 'pathSummary', 'ruleVersion', 'contentVersion',
+  'capstoneId', 'capstoneTitle', 'capstoneSummary', 'capstoneRequirements', 'capstoneRubric',
+  'kind', 'number', 'range', 'courseId', 'courseNumber', 'courseTitle', 'courseSummary', 'courseMilestone',
+  'courseObjectives', 'stage', 'stageTitle', 'stageOutcome', 'stagePublished',
+]);
+
+/** The type as Claude sees it: Hearken's path-only fields taken out. */
+export function typeForAi<T extends Pick<ContentTypeView, 'app' | 'slug' | 'definition'>>(type: T): T {
+  if (type.app !== 'hearken' || type.slug !== 'learning-module') return type;
+  const keep = (fields: FieldDef[]) => fields.filter((field) => !HEARKEN_PATH_FIELDS.has(field.key));
+  const { definition } = type;
+  return {
+    ...type,
+    definition: {
+      ...definition,
+      fields: keep(definition.fields),
+      sections: definition.sections ? { ...definition.sections, fields: keep(definition.sections.fields) } : definition.sections,
+    },
+  };
+}
+
 /** The blocks Claude may use in a type: the AI blocks it allows, plus scripture for Hearken's types. */
 export function aiBlocks(type: Pick<ContentTypeView, 'app' | 'definition'>): BlockKind[] {
   return type.definition.blocks.filter((kind) => (AI_BLOCKS as readonly string[]).includes(kind) || (kind === 'scripture' && type.app === 'hearken'));
@@ -525,7 +553,8 @@ export async function writeDraft(options: {
   content: ContentService; teamId: string; actor: string; app: string; type: ContentTypeView; request: GenerateRequest;
   dependencies: WriteWithAiDependencies & { anthropicApiKey: string }; emit: (event: WriteEvent) => Promise<void>;
 }): Promise<void> {
-  const { content, teamId, actor, app, type, request, dependencies, emit } = options;
+  const { content, teamId, actor, app, request, dependencies, emit } = options;
+  const type = typeForAi(options.type);
   const now = dependencies.now ?? Date.now;
   const log = dependencies.log ?? ((record) => { if (process.env.NODE_ENV !== 'test') console.info(JSON.stringify(record)); });
   const model = dependencies.model || DEFAULT_CONTENT_MODEL;

@@ -5,7 +5,7 @@ import { ApiError } from '../../src/errors.js';
 import type { Body, Listing, TypeDefinition } from '../../src/content/model.js';
 import type { ContentService, ContentTypeView } from '../../src/content/service.js';
 import {
-  aiBlocks, fieldValues, outlineMessage, outlineTool, sectionMessage, sectionTool, systemPrompt, toBlock, toListing,
+  aiBlocks, fieldValues, outlineMessage, outlineTool, sectionMessage, sectionTool, systemPrompt, toBlock, toListing, typeForAi,
 } from '../../src/content/write-with-ai.js';
 import type { Outline, WriteEvent } from '../../src/content/write-with-ai.js';
 import type { ReserveQuota } from '../../src/services/quota.js';
@@ -508,5 +508,26 @@ describe('POST /v1/content/entries/generate before the stream', () => {
     const media = await generate(everywhere, { ...request, app: 'suffice', typeId: ids.media }, 'everywhere');
     expect(media.status).toBe(422);
     expect(await media.json()).toMatchObject({ error: { code: 'NO_AI_BLOCKS' } });
+  });
+});
+
+describe('typeForAi', () => {
+  const withPath: TypeDefinition = {
+    ...moduleDefinition,
+    fields: [...moduleDefinition.fields, { key: 'subjectId', label: 'Hearken subject ID', type: 'text', required: false }, { key: 'pathTitle', label: 'Scholar Path title', type: 'text', required: false }],
+    sections: { label: 'Lesson', fields: [...moduleDefinition.sections!.fields, { key: 'kind', label: 'Kind', type: 'text', required: false }, { key: 'stage', label: 'Stage', type: 'number', required: false }, { key: 'courseId', label: 'Course ID', type: 'text', required: false }] },
+  };
+
+  it("hides Hearken's Scholar Path fields from Claude", () => {
+    const type = typeForAi({ ...types[ids.module]!, definition: withPath });
+    expect(type.definition.fields.map((field) => field.key)).toEqual(['subject', 'summary']);
+    expect(type.definition.sections!.fields.map((field) => field.key)).toEqual(['objective']);
+    expect(systemPrompt('hearken', type)).not.toMatch(/subjectId|pathTitle|courseId|\bkind\b/);
+    expect(JSON.stringify(sectionTool(type))).not.toContain('"kind"');
+  });
+
+  it('leaves other types alone', () => {
+    const other = { ...types[ids.module]!, app: 'suffice', definition: withPath };
+    expect(typeForAi(other)).toBe(other);
   });
 });
