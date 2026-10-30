@@ -28,6 +28,8 @@ export type AccountDeletionDependencies = {
   hearken?: HearkenService | undefined;
   budgetGroups?: Pick<BudgetGroupsService, 'purgeUser'> | undefined;
   reports?: ReportStore | undefined;
+  /** Hearth Content: the person's Collection ratings and reports. */
+  collections?: { forgetUser: (userId: string) => Promise<void> } | undefined;
   /** Ends an affiliate's own sign-in (their credit and payouts are the team's records and stay). */
   affiliates?: { forgetUser: (userId: string) => Promise<void> } | undefined;
 };
@@ -202,6 +204,14 @@ export async function deleteHearthAccount(userId: string, options: DeleteAccount
       await dependencies.reports.removeByReporter(userId);
     } catch (error) {
       throw new AccountDeletionError('reports cleanup', 'Failed to delete account', error);
+    }
+  }
+
+  if (dependencies.collections) {
+    try {
+      await dependencies.collections.forgetUser(userId);
+    } catch (error) {
+      throw new AccountDeletionError('collections cleanup', 'Failed to delete account', error);
     }
   }
 

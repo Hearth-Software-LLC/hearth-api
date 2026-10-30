@@ -40,7 +40,7 @@ import { createBudgetGroupsService } from './budget-groups/service.js';
 import type { BudgetGroupsService } from './budget-groups/service.js';
 import { createApnsSender } from './integrations/apns.js';
 import { appAccess, effectiveEntitlements } from './services/subscriptions.js';
-import { createEntitlementGate, createHearthPlusGate, loadEntitlements } from './services/entitlements.js';
+import { createCollectionAccess, createEntitlementGate, createHearthPlusGate, loadEntitlements } from './services/entitlements.js';
 import type { EntitlementSource } from './services/entitlements.js';
 import type { Sql } from 'postgres';
 import { createReportStore } from './services/reports.js';
@@ -237,7 +237,8 @@ export function createApp(options: AppOptions = {}) {
   const requireAuth = authMiddleware(verifyToken);
   app.use('/v1/*', async (context, next) => {
     if (context.req.path.startsWith('/v1/bigtable/')) return next();
-    // Each Hearth app reads its content catalog without signing in.
+    // Each Hearth app reads its content catalog without signing in (Collections' rating, report
+    // and download routes under /v1/content/<app>/items/ still need a token).
     if (context.req.method === 'GET' && PUBLIC_CATALOG.test(context.req.path)) return next();
     return requireAuth(context, next);
   });
@@ -429,6 +430,9 @@ export function createApp(options: AppOptions = {}) {
     content: () => contentService,
     apps: () => options.studio?.apps ?? githubAppsFromConfig(config, options.fetcher ?? fetch),
     library: () => studioLibrary,
+    reserveQuota,
+    // Plus Collections: hearth_plus or the app's own plan (own or the household organizer's).
+    plusAccess: createCollectionAccess(config.ENFORCE_ENTITLEMENTS, entitlementSource),
   });
   // Scheduled publishes also go out whenever an app reads its catalog; this catches quiet periods.
   app.get('/internal/content/cron', async (context) => {
@@ -475,6 +479,7 @@ export function createApp(options: AppOptions = {}) {
   // DELETE /v1/me and DELETE /v1/bigtable/me share one deletion, which needs these.
   setAccountDeletionDependencies({
     plaidClient: plaidDataClient, connections: connectionStore, seal: tokenSeal, hearken, budgetGroups, reports, affiliates: affiliateService,
+    collections: contentService,
   });
   registerAccount(app);
 
@@ -592,7 +597,10 @@ const supabaseLibraryStorage: StudioStorage = {
   },
 };
 
-/** Hearth Content's bundles and images in the public hearth-content bucket (supabase/migrations/20261030120000_hearth_content.sql). */
+/**
+ * Hearth Content's bundles and images in the public hearth-content bucket (supabase/migrations/20261030120000_hearth_content.sql),
+ * and Plus Collections' bundles in the private hearth-content-plus bucket (20261031090000_content_collections.sql).
+ */
 function supabaseContentStorage(supabaseUrl: string): ContentStorage {
   const base = `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/public/hearth-content/`;
   return {
@@ -606,6 +614,15 @@ function supabaseContentStorage(supabaseUrl: string): ContentStorage {
       return { url: data.signedUrl, token: data.token };
     },
     publicUrl: (path) => base + path.split('/').map(encodeURIComponent).join('/'),
+    async putPlus(path, bytes, contentType) {
+      const { error } = await supabaseAdmin.storage.from('hearth-content-plus').upload(path, bytes, { contentType, upsert: true });
+      if (error) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Content storage could not save the file');
+    },
+    async plusUrl(path, seconds) {
+      const { data, error } = await supabaseAdmin.storage.from('hearth-content-plus').createSignedUrl(path, seconds);
+      if (error || !data) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Downloads are temporarily unavailable');
+      return data.signedUrl;
+    },
   };
 }
 

@@ -52,3 +52,18 @@ export function requireApp(gate: EntitlementGate, app: HearthApp): MiddlewareHan
     await next();
   };
 }
+
+/**
+ * Plus Collections in an app: `hearth_plus` or `<app>_plus`, own or the household organizer's (as
+ * in /v1/me/entitlements). Throws 402 ENTITLEMENT_REQUIRED otherwise; lets everything through
+ * unless `enforce`.
+ */
+export function createCollectionAccess(enforce: boolean, source: EntitlementSource | undefined): (userId: string, app: string) => Promise<void> {
+  if (!enforce) return async () => undefined;
+  return async (userId, app) => {
+    const entitlements = await loadEntitlements(source, userId);
+    if (!entitlements.some((entry) => entry.id === 'hearth_plus' || entry.id === `${app}_plus`)) {
+      throw new ApiError(402, 'ENTITLEMENT_REQUIRED', 'This Collection needs Hearth+ or the app’s Plus plan');
+    }
+  };
+}

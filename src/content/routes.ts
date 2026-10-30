@@ -9,8 +9,10 @@ import type { GitHubApps } from '../studio/github.js';
 import type { LibraryService } from '../studio/library.js';
 import { atLeast, contentLevel, hasContentAccess, hasStudioAccess } from '../studio/team.js';
 import type { ContentLevel, Member, TeamService } from '../studio/team.js';
-import { BLOCK_KINDS, BLOCK_LIBRARY, bodySchema, definitionSchema } from './model.js';
-import { MEDIA_TYPES } from './service.js';
+import type { ReserveQuota } from '../services/quota.js';
+import { BLOCK_KINDS, BLOCK_LIBRARY, COVERS, bodySchema, definitionSchema, listingSchema } from './model.js';
+import type { MonogramColor } from './model.js';
+import { FEATURED_LABELS, MEDIA_TYPES, REPORT_REASONS } from './service.js';
 import type { ContentService, MediaType } from './service.js';
 
 /**
@@ -26,6 +28,10 @@ export type ContentDependencies = {
   content: () => ContentService | undefined;
   apps: () => GitHubApps | undefined;
   library: () => LibraryService | undefined;
+  /** Rate limits for ratings and reports from the apps. */
+  reserveQuota: ReserveQuota;
+  /** Throws 402 ENTITLEMENT_REQUIRED unless the person may download the app's Plus Collections. */
+  plusAccess: (userId: string, app: string) => Promise<void>;
 };
 
 /** Publishing and rolling back need a sign-in from the last 12 hours. */
@@ -84,6 +90,12 @@ const memberView = (caller: Member) => ({
 /** A catalog path: /v1/content/<app>/catalog. Public, so the /v1 token check skips it. */
 export const PUBLIC_CATALOG = /^\/v1\/content\/[a-z0-9-]{1,40}\/catalog$/;
 
+/**
+ * An item in an app: /v1/content/<app>/items/<id>/(rating|report|download). Anyone signed in to a
+ * Hearth app uses these, so they need the normal token but not the content team.
+ */
+export const APP_ITEM = /^\/v1\/content\/[a-z0-9-]{1,40}\/items\/[0-9a-fA-F-]{36}\/(?:rating|report|download)$/;
+
 export function registerContent(app: OpenAPIHono<ApiEnvironment>, dependencies: ContentDependencies) {
   const required = <T>(get: () => T | undefined, what: string): T => {
     const value = get();
@@ -107,10 +119,23 @@ export function registerContent(app: OpenAPIHono<ApiEnvironment>, dependencies: 
   app.openapi(createRoute({
     method: 'get', path: '/v1/content/{app}/catalog', tags: ['Content'],
     summary: 'An app’s content catalog: its own published items plus every shared one (public)',
-    request: { params: z.object({ app: appKey.openapi({ param: { name: 'app', in: 'path' } }) }) },
+    description: 'Format 1 (no `format`) is what older builds read, without Plus Collections. `format=2` adds each item’s listing, '
+      + 'access, download size, author and rating, plus `featured` and `authors`; Plus items have `url: ""` (POST …/items/{id}/download for a link).',
+    request: {
+      params: z.object({ app: appKey.openapi({ param: { name: 'app', in: 'path' } }) }),
+      query: z.object({ format: z.enum(['1', '2']).optional() }),
+    },
     responses: { 200: anyJson('Catalog'), 304: { description: 'Unchanged' }, ...errors },
   }), async (context) => {
-    const catalog = await content().catalog(context.req.valid('param').app);
+    const { app } = context.req.valid('param');
+    if (context.req.valid('query').format === '2') {
+      const { body: catalog, etag } = await content().catalogV2(app);
+      context.header('Cache-Control', 'public, max-age=60');
+      context.header('ETag', etag);
+      if (context.req.header('If-None-Match') === etag) return context.body(null, 304);
+      return context.json(catalog, 200);
+    }
+    const catalog = await content().catalog(app);
     const etag = `"${catalog.app}-${catalog.version}-${catalog.sharedVersion}-${catalog.minAppVersion}"`;
     context.header('Cache-Control', 'public, max-age=60');
     context.header('ETag', etag);
@@ -118,9 +143,66 @@ export function registerContent(app: OpenAPIHono<ApiEnvironment>, dependencies: 
     return context.json(catalog, 200);
   });
 
+  // MARK: Collections in the apps (any signed-in Hearth account, before the team check)
+
+  const appItemParams = z.object({
+    app: appKey.openapi({ param: { name: 'app', in: 'path' } }),
+    id: uuid.openapi({ param: { name: 'id', in: 'path' } }),
+  });
+  const userRoute = <R extends Omit<RouteConfig, 'tags' | 'security'>>(config: R) =>
+    createRoute({ ...config, tags: ['Collections'], security: [{ BearerAuth: [] }] } as R & { tags: string[] });
+  /** Ratings and reports need a durable account, like POST /v1/reports. */
+  const registered = (context: AnyContext) => {
+    if (context.get('isAnonymous')) throw new ApiError(401, 'UNAUTHORIZED', 'Sign in with Apple to rate or report Collections');
+    return context.get('userId');
+  };
+
+  app.openapi(userRoute({
+    method: 'put', path: '/v1/content/{app}/items/{id}/rating', summary: 'Rate a Collection 1 to 5 stars (replaces your earlier rating)',
+    request: { params: appItemParams, ...body(z.object({ stars: z.number().int().min(1).max(5) }).strict()) },
+    responses: { 200: anyJson('{ average, count, mine }'), ...errors },
+  }), async (context) => {
+    const userId = registered(context);
+    await dependencies.reserveQuota(userId, 'collections');
+    const { app: appName, id } = context.req.valid('param');
+    return context.json(await content().rate(appName, id, userId, context.req.valid('json').stars), 200);
+  });
+
+  app.openapi(userRoute({
+    method: 'get', path: '/v1/content/{app}/items/{id}/rating', summary: 'Your rating of a Collection, or null',
+    request: { params: appItemParams }, responses: { 200: anyJson('{ mine }'), ...errors },
+  }), async (context) => {
+    const { app: appName, id } = context.req.valid('param');
+    return context.json(await content().myRating(appName, id, context.get('userId')), 200);
+  });
+
+  app.openapi(userRoute({
+    method: 'post', path: '/v1/content/{app}/items/{id}/report', summary: 'Report a Collection for review (202; who sent it is never shown)',
+    request: { params: appItemParams, ...body(z.object({ reason: z.enum(REPORT_REASONS), details: z.string().trim().max(1000).default('') }).strict()) },
+    responses: { 202: { description: 'Received' }, ...errors },
+  }), async (context) => {
+    const userId = registered(context);
+    await dependencies.reserveQuota(userId, 'collections');
+    const { app: appName, id } = context.req.valid('param');
+    await content().report(appName, id, userId, context.req.valid('json'));
+    return context.body(null, 202);
+  });
+
+  app.openapi(userRoute({
+    method: 'post', path: '/v1/content/{app}/items/{id}/download',
+    summary: 'Where to download a Collection: the public URL (free), or a 10-minute signed link (Plus, with the plan)',
+    description: 'Plus needs `hearth_plus` or `<app>_plus` (own or the household organizer’s); 402 ENTITLEMENT_REQUIRED otherwise. '
+      + 'When ENFORCE_ENTITLEMENTS is off it always signs. `expiresAt` is null for free items. Nothing records who downloaded what.',
+    request: { params: appItemParams }, responses: { 200: anyJson('{ url, expiresAt }'), 402: failure('Needs Hearth+ or the app’s Plus plan'), ...errors },
+  }), async (context) => {
+    const { app: appName, id } = context.req.valid('param');
+    const userId = context.get('userId');
+    return context.json(await content().download(appName, id, () => dependencies.plusAccess(userId, appName)), 200);
+  });
+
   // Everything else: the caller must be on the team with content access.
   app.use('/v1/content/*', async (context, next) => {
-    if (PUBLIC_CATALOG.test(context.req.path)) return next();
+    if (PUBLIC_CATALOG.test(context.req.path) || APP_ITEM.test(context.req.path)) return next();
     if (context.get('isAnonymous')) throw new ApiError(403, 'REGISTERED_IDENTITY_REQUIRED', 'Sign in with Apple to use Hearth Content');
     const caller = await team().memberOf(context.get('userId'));
     if (!caller) throw new ApiError(403, 'NOT_ON_TEAM', 'This account isn’t on the content team yet. Enter your invite code.');
@@ -200,6 +282,11 @@ export function registerContent(app: OpenAPIHono<ApiEnvironment>, dependencies: 
     responses: { 200: anyJson('Blocks'), ...errors },
   }), async (context) => context.json({ blocks: BLOCK_KINDS.map((kind) => ({ kind, ...BLOCK_LIBRARY[kind], app: BLOCK_LIBRARY[kind].app ?? null })) }, 200));
 
+  app.openapi(route({
+    method: 'get', path: '/v1/content/covers', summary: 'Cover templates, palettes and author colors (both renderers read these)',
+    responses: { 200: anyJson('Covers'), ...errors },
+  }), async (context) => context.json(COVERS, 200));
+
   // MARK: Content types
 
   app.openapi(route({
@@ -276,6 +363,23 @@ export function registerContent(app: OpenAPIHono<ApiEnvironment>, dependencies: 
     const { caller } = await itemFor(context, context.req.valid('param').id, 'author');
     try {
       return context.json(await content().saveDraft(caller.teamId, caller.userId, context.req.valid('param').id, context.req.valid('json')), 200);
+    } catch (error) {
+      if (error instanceof VersionConflict) {
+        return context.json({ error: { code: error.code, message: error.message, requestId: context.get('requestId') }, current: error.current }, 409);
+      }
+      throw error;
+    }
+  });
+
+  app.openapi(route({
+    method: 'put', path: '/v1/content/entries/{id}/listing',
+    summary: 'Save a Collection’s listing (title, about, categories, Free or Plus, cover). Same revision rule as the draft',
+    request: { params: idParam, ...body(z.object({ revision: z.number().int().min(1), listing: listingSchema }).strict()) },
+    responses: { 200: anyJson('{ revision }'), ...errors, 409: anyJson('Someone saved since: the current item') },
+  }), async (context) => {
+    const { caller } = await itemFor(context, context.req.valid('param').id, 'author');
+    try {
+      return context.json(await content().saveListing(caller.teamId, caller.userId, context.req.valid('param').id, context.req.valid('json')), 200);
     } catch (error) {
       if (error instanceof VersionConflict) {
         return context.json({ error: { code: error.code, message: error.message, requestId: context.get('requestId') }, current: error.current }, 409);
@@ -478,5 +582,81 @@ export function registerContent(app: OpenAPIHono<ApiEnvironment>, dependencies: 
     const caller = need(context, context.req.valid('param').app, 'owner');
     await content().setMinAppVersion(caller.teamId, caller.userId, context.req.valid('param').app, context.req.valid('json').minAppVersion);
     return context.json(ok, 200);
+  });
+  // MARK: Collections (team)
+
+  const authorInput = z.object({
+    name: z.string().trim().min(1).max(40),
+    bio: z.string().trim().max(160),
+    color: z.enum(COVERS.monograms as unknown as [MonogramColor, ...MonogramColor[]]),
+    photoMediaId: uuid.nullable(),
+  }).strict();
+
+  app.openapi(route({
+    method: 'get', path: '/v1/content/authors/me', summary: 'Your author profile, as the apps show it',
+    responses: { 200: anyJson('Author'), ...errors },
+  }), async (context) => {
+    const caller = member(context);
+    return context.json(await content().author(caller.teamId, caller.userId), 200);
+  });
+
+  app.openapi(route({
+    method: 'put', path: '/v1/content/authors/me', summary: 'Change your author profile (name, bio, monogram color, photo)',
+    request: body(authorInput), responses: { 200: anyJson('Author'), ...errors },
+  }), async (context) => {
+    const caller = member(context);
+    return context.json(await content().setAuthor(caller.teamId, caller.userId, context.req.valid('json')), 200);
+  });
+
+  app.openapi(route({
+    method: 'get', path: '/v1/content/authors/me/collections', summary: 'Your Collections, with ratings and open reports',
+    responses: { 200: anyJson('Collections'), ...errors },
+  }), async (context) => {
+    const caller = member(context);
+    return context.json(visible(caller, await content().authorCollections(caller.teamId, caller.userId)), 200);
+  });
+
+  const catalogParam = z.object({ app: appKey.openapi({ param: { name: 'app', in: 'path' } }) });
+  const featuredItems = z.object({
+    items: z.array(z.object({ id: uuid, label: z.enum(FEATURED_LABELS).nullable() }).strict()).max(5),
+  }).strict();
+
+  app.openapi(route({
+    method: 'get', path: '/v1/content/catalogs/{app}/featured', summary: 'The Collections featured at the top of an app’s Discover',
+    request: { params: catalogParam }, responses: { 200: anyJson('{ items }'), ...errors },
+  }), async (context) => {
+    const caller = need(context, context.req.valid('param').app, 'author');
+    return context.json(await content().featured(caller.teamId, context.req.valid('param').app), 200);
+  });
+
+  app.openapi(route({
+    method: 'put', path: '/v1/content/catalogs/{app}/featured',
+    summary: 'Feature up to five items published in the app (publishers); bumps the catalog version',
+    request: { params: catalogParam, ...body(featuredItems) }, responses: { 200: anyJson('{ items }'), ...errors },
+  }), async (context) => {
+    const caller = need(context, context.req.valid('param').app, 'publisher');
+    return context.json(await content().setFeatured(caller.teamId, caller.userId, context.req.valid('param').app, context.req.valid('json').items), 200);
+  });
+
+  app.openapi(route({
+    method: 'get', path: '/v1/content/reports', summary: 'Open reports on Collections, by item, oldest first (publishers). Never says who reported',
+    request: { query: z.object({ state: z.literal('open').default('open') }) },
+    responses: { 200: anyJson('Reports'), ...errors },
+  }), async (context) => {
+    const caller = member(context);
+    if (caller.role === 'member' && caller.contentRole !== 'publisher') throw new ApiError(403, 'PERMISSION_REQUIRED', 'Only publishers review reports');
+    const reports = await content().openReports(caller.teamId);
+    return context.json(reports.filter((item) => atLeast(contentLevel(caller, item.app), 'publisher')), 200);
+  });
+
+  app.openapi(route({
+    method: 'post', path: '/v1/content/reports/{id}/dismiss', summary: 'Close an item’s open reports (publishers). `id` is the item',
+    request: { params: idParam }, responses: { 204: { description: 'Dismissed' }, ...errors },
+  }), async (context) => {
+    const caller = member(context);
+    const entryId = context.req.valid('param').id;
+    need(context, await content().entryApp(caller.teamId, entryId), 'publisher');
+    await content().dismissReports(caller.teamId, caller.userId, entryId);
+    return context.body(null, 204);
   });
 }

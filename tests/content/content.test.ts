@@ -17,6 +17,7 @@ const module: TypeDefinition = {
   sections: { label: 'Lesson', fields: [] },
   blocks: ['text', 'scripture', 'quiz', 'image'],
   reviewSteps: ['Doctrine review'],
+  listing: null,
 };
 
 const quiz = (correct: number) => ({
@@ -69,6 +70,8 @@ describe.skipIf(!url)('Hearth Content (Postgres)', () => {
     put: async (path, bytes) => { stored.set(path, new TextDecoder().decode(bytes)); },
     uploadUrl: async (path) => ({ url: `https://storage.test/upload/${path}`, token: 't' }),
     publicUrl: (path) => `https://cdn.test/${path}`,
+    putPlus: async (path, bytes) => { stored.set(`plus:${path}`, new TextDecoder().decode(bytes)); },
+    plusUrl: async (path, seconds) => `https://storage.test/signed/${path}?expires=${seconds}`,
   };
   let removedAvatars: string[];
   const studioStorage: StudioStorage = {
@@ -242,6 +245,9 @@ describe.skipIf(!url)('Hearth Content (Postgres)', () => {
     const stale = await call('author', 'PUT', `/v1/content/entries/${id}/draft`, { body, revision: 1 });
     expect(stale.status).toBe(409);
     expect(stale.body.current.version.revision).toBe(2);
+    // Learning modules are Collections: they need a listing with a cover too.
+    const listing = { title: 'The Godhead', about: 'Three distinct beings, one purpose: what the scriptures teach about the Father, the Son and the Holy Ghost.', categories: ['Doctrine'], access: 'free', cover: { kind: 'template', template: 'orbit', palette: 'midnight', title: 'The Godhead', mirror: false, italic: false } };
+    expect((await call('author', 'PUT', `/v1/content/entries/${id}/listing`, { revision: 2, listing })).body).toEqual({ revision: 3 });
 
     // Review.
     const checks = await call('author', 'GET', `/v1/content/entries/${id}/checks`);
@@ -279,7 +285,7 @@ describe.skipIf(!url)('Hearth Content (Postgres)', () => {
 
     // Editing after publishing starts version 2; publishing it and rolling back moves the catalog.
     body.sections![0]!.blocks[0] = { id: 'b1', type: 'text', text: 'The Godhead is made up of three separate beings.' };
-    const v2 = await call('author', 'PUT', `/v1/content/entries/${id}/draft`, { body, revision: 2 });
+    const v2 = await call('author', 'PUT', `/v1/content/entries/${id}/draft`, { body, revision: 3 });
     expect(v2.body.version).toMatchObject({ version: 2, state: 'draft' });
     expect(v2.body.entry).toMatchObject({ latestVersion: 2, liveVersion: 1 });
     expect((await call('author', 'GET', `/v1/content/entries/${id}/diff`)).body).toMatchObject({ from: 1, to: 2, edited: 1, added: 0 });
