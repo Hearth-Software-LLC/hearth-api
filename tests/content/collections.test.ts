@@ -266,6 +266,7 @@ describe.skipIf(!url)('Collections (Postgres)', () => {
   let release: (() => Promise<void>) | undefined;
   let stored: Map<string, string>;
   let plans: Record<string, EffectiveEntitlement[]>;
+  let quota: string[];
   const storage: ContentStorage = {
     put: async (path, bytes) => { stored.set(path, new TextDecoder().decode(bytes)); },
     putPlus: async (path, bytes) => { stored.set(`plus:${path}`, new TextDecoder().decode(bytes)); },
@@ -276,7 +277,7 @@ describe.skipIf(!url)('Collections (Postgres)', () => {
   const build = (enforce: boolean) => createApp({
     config: readConfig({ SOCIAL_OWNER_IDS: steve, ENFORCE_ENTITLEMENTS: enforce ? 'true' : 'false' }),
     verifyToken: async (bearer) => ({ userId: users[bearer] ?? stranger, isAnonymous: bearer === 'anonymous', signedInAt: Date.now() / 1000 - 60 }),
-    reserveQuota: async () => undefined,
+    reserveQuota: async (_userId, operation) => { quota.push(operation); },
     entitlements: async (userId) => plans[userId] ?? [],
     studio: { team: createTeamService(sql, { ownerIds: [steve] }), sql },
     content: { service: createContentService(sql, { storage }) },
@@ -292,6 +293,7 @@ describe.skipIf(!url)('Collections (Postgres)', () => {
     await reset(sql);
     stored = new Map();
     plans = {};
+    quota = [];
     app = build(true);
   });
 
@@ -424,17 +426,40 @@ describe.skipIf(!url)('Collections (Postgres)', () => {
     expect((await call(null, 'GET', '/v1/content/hearken/catalog', undefined, { 'If-None-Match': v1.headers.get('ETag')! })).status).toBe(304);
     expect((await call('author', 'PUT', '/v1/content/authors/me', { name: 'M', bio: '', color: '#123456', photoMediaId: null })).status).toBe(400);
 
-    // Rolling back keeps the full hash and download size.
-    const releases = (await call('steve', 'GET', `/v1/content/releases?entry=${plus.id}`)).body.releases;
-    await call('steve', 'POST', `/v1/content/entries/${plus.id}/rollback`, { releaseId: releases[0].id });
-    const rolled = (await call(null, 'GET', '/v1/content/hearken/catalog?format=2')).body.entries.find((entry: { slug: string }) => entry.slug === 'temples');
-    expect(rolled).toMatchObject({ sha256: byslug.temples.sha256, downloadBytes: byslug.temples.downloadBytes, url: '', access: 'plus' });
+    // Plus releases have no public bundle URL.
+    let releases = (await call('steve', 'GET', `/v1/content/releases?entry=${plus.id}`)).body.releases;
+    expect(releases[0].bundleUrl).toBeNull();
+    expect((await call('steve', 'GET', `/v1/content/releases?entry=${free.id}`)).body.releases[0].bundleUrl).toMatch(/^https:\/\/cdn\.test\//);
+
+    // Version 2 drops the image; rolling back to version 1 brings back v1's hash and download size.
+    const draft = (await call('steve', 'GET', `/v1/content/entries/${plus.id}`)).body;
+    const v2body = { ...draft.version.body, sections: draft.version.body.sections.map((section: { blocks: { type: string }[] }) => ({ ...section, blocks: section.blocks.filter((block) => block.type !== 'image') })) };
+    await call('steve', 'PUT', `/v1/content/entries/${plus.id}/draft`, { body: v2body, revision: draft.version.revision });
+    await call('steve', 'POST', `/v1/content/entries/${plus.id}/submit`);
+    await call('steve', 'POST', `/v1/content/entries/${plus.id}/publish`, { override: true });
+    const temples = async () => (await call(null, 'GET', '/v1/content/hearken/catalog?format=2')).body.entries.find((entry: { slug: string }) => entry.slug === 'temples');
+    const second = await temples();
+    expect(second.version).toBe(2);
+    expect(second.sha256).not.toBe(byslug.temples.sha256);
+    expect(second.downloadBytes).toBe(second.bytes);
+    releases = (await call('steve', 'GET', `/v1/content/releases?entry=${plus.id}`)).body.releases;
+    const first = releases.find((entry: { version: number }) => entry.version === 1);
+    await call('steve', 'POST', `/v1/content/entries/${plus.id}/rollback`, { releaseId: first.id });
+    expect(await temples()).toMatchObject({ version: 1, sha256: byslug.temples.sha256, downloadBytes: byslug.temples.downloadBytes, url: '', access: 'plus' });
+
+    // A release from before Collections (no full hash, no download size) rolls back with sha256 "" and the size counted fresh.
+    await sql`update content_releases set sha256 = null, download_bytes = null where id = ${first.id}`;
+    const latest = releases.find((entry: { version: number }) => entry.version === 2);
+    await call('steve', 'POST', `/v1/content/entries/${plus.id}/rollback`, { releaseId: latest.id });
+    await call('steve', 'POST', `/v1/content/entries/${plus.id}/rollback`, { releaseId: first.id });
+    expect(await temples()).toMatchObject({ version: 1, sha256: '', hash: byslug.temples.hash, downloadBytes: byslug.temples.downloadBytes });
   });
 
   it('features up to five published items', async () => {
     await join('author', { post: false, content: { role: 'author', apps: ['hearken'] } });
     const { id } = await publishModule('steve', 'The Godhead', listing());
     const before = await call(null, 'GET', '/v1/content/hearken/catalog?format=2');
+    const before1 = await call(null, 'GET', '/v1/content/hearken/catalog');
     expect((await call('steve', 'GET', '/v1/content/catalogs/hearken/featured')).body).toEqual({ items: [] });
     expect((await call('author', 'PUT', '/v1/content/catalogs/hearken/featured', { items: [{ id, label: null }] })).status).toBe(403);
     expect((await call('steve', 'PUT', '/v1/content/catalogs/hearken/featured', { items: [{ id: stranger, label: null }] })).body.error.code).toBe('NOT_PUBLISHED');
@@ -446,7 +471,9 @@ describe.skipIf(!url)('Collections (Postgres)', () => {
     expect(set.body).toEqual({ items: [{ id, label: 'Editor’s pick' }] });
     expect((await call('author', 'GET', '/v1/content/catalogs/hearken/featured')).body).toEqual({ items: [{ id, label: 'Editor’s pick' }] });
     const after = await call(null, 'GET', '/v1/content/hearken/catalog?format=2');
-    expect(after.body.version).toBe(before.body.version + 1);
+    // Featuring changes the format-2 ETag only: old builds' catalog version stays.
+    expect(after.body.version).toBe(before.body.version);
+    expect((await call(null, 'GET', '/v1/content/hearken/catalog', undefined, { 'If-None-Match': before1.headers.get('ETag')! })).status).toBe(304);
     expect(after.body.featured).toEqual([{ id, label: 'Editor’s pick' }]);
     expect(after.headers.get('ETag')).not.toBe(before.headers.get('ETag'));
     // Unpublished items drop out of the featured list the apps see.
@@ -464,8 +491,11 @@ describe.skipIf(!url)('Collections (Postgres)', () => {
     expect((await call('r1', 'PUT', `/v1/content/sated/items/${id}/rating`, { stars: 5 })).status).toBe(404);
     expect((await call('r1', 'GET', path)).body).toEqual({ mine: null });
 
-    expect((await call('r1', 'PUT', path, { stars: 2 })).body).toEqual({ average: 2, count: 1, mine: 2 });
-    expect((await call('r1', 'PUT', path, { stars: 4 })).body).toEqual({ average: 4, count: 1, mine: 4 });
+    const v1Before = await call(null, 'GET', '/v1/content/hearken/catalog');
+    expect((await call('r1', 'PUT', path, { stars: 2 })).body).toEqual({ average: null, count: 1, mine: 2 });
+    expect((await call('r1', 'PUT', path, { stars: 4 })).body).toEqual({ average: null, count: 1, mine: 4 });
+    expect(new Set(quota)).toEqual(new Set(['collections']));
+    expect(quota.length).toBeGreaterThanOrEqual(2);
     expect((await call('r1', 'GET', path)).body).toEqual({ mine: 4 });
     for (const who of ['r2', 'r3', 'r4']) await call(who, 'PUT', path, { stars: 5 });
     const four = await call(null, 'GET', '/v1/content/hearken/catalog?format=2');
@@ -473,8 +503,10 @@ describe.skipIf(!url)('Collections (Postgres)', () => {
     expect((await call('r5', 'PUT', path, { stars: 4 })).body).toEqual({ average: 4.6, count: 5, mine: 4 });
     const five = await call(null, 'GET', '/v1/content/hearken/catalog?format=2');
     expect(five.body.entries[0].rating).toEqual({ average: 4.6, count: 5 });
-    expect(five.body.version).toBe(four.body.version + 1);
+    // Ratings change the format-2 ETag only; old builds keep their catalog version and a 304.
+    expect(five.body.version).toBe(four.body.version);
     expect(five.headers.get('ETag')).not.toBe(four.headers.get('ETag'));
+    expect((await call(null, 'GET', '/v1/content/hearken/catalog', undefined, { 'If-None-Match': v1Before.headers.get('ETag')! })).status).toBe(304);
     // Format 1 never shows ratings.
     expect('rating' in (await call(null, 'GET', '/v1/content/hearken/catalog')).body.entries[0]).toBe(false);
 
@@ -538,6 +570,54 @@ describe.skipIf(!url)('Collections (Postgres)', () => {
     expect((await call('r2', 'POST', path, undefined, {}, build(false))).status).toBe(200);
   });
 
+  it('counts every rating when people rate at once', async () => {
+    const { id } = await publishModule('steve', 'The Godhead', listing());
+    await Promise.all(['r1', 'r2', 'r3', 'r4', 'r5'].map((who, index) => call(who, 'PUT', `/v1/content/hearken/items/${id}/rating`, { stars: index + 1 })));
+    const [row] = await sql`select rating_count, rating_average from content_entries where id = ${id}`;
+    expect({ count: row!.rating_count, average: Number(row!.rating_average) }).toEqual({ count: 5, average: 3 });
+    expect(await sql`select 1 from content_ratings where entry_id = ${id}`).toHaveLength(5);
+    expect((await call(null, 'GET', '/v1/content/hearken/catalog?format=2')).body.entries[0].rating).toEqual({ average: 3, count: 5 });
+  });
+
+  it('caps reports at 20 a day, even sent at once', async () => {
+    const items: string[] = [];
+    for (let n = 0; n < 21; n += 1) items.push((await publishModule('steve', `Module ${n}`, listing({ title: `Module ${n}` }))).id);
+    const sent = await Promise.all(items.map((id) => call('r1', 'POST', `/v1/content/hearken/items/${id}/report`, { reason: 'broken', details: '' })));
+    expect(sent.filter((response) => response.status === 202)).toHaveLength(20);
+    expect(sent.filter((response) => response.status === 429)).toHaveLength(1);
+    expect(await sql`select 1 from content_collection_reports`).toHaveLength(20);
+    expect(quota.filter((operation) => operation === 'collections')).toHaveLength(21);
+    // The same person reporting the same item twice at once stays one open report.
+    await sql`delete from content_collection_reports`;
+    await Promise.all([1, 2, 3].map(() => call('r2', 'POST', `/v1/content/hearken/items/${items[0]}/report`, { reason: 'other', details: '' })));
+    expect(await sql`select 1 from content_collection_reports`).toHaveLength(1);
+  });
+
+  it('shows covers on the Content table and the photo id on authors/me', async () => {
+    const crops = { portrait: await upload(1, 1600, 2000), square: await upload(2, 1200, 1200), wide: await upload(3, 2400, 1000) };
+    const photo = await upload(4, 800, 800);
+    const { id } = await publishModule('steve', 'Temples', listing({ cover: { ...imageCover, ...crops } }));
+    await publishModule('steve', 'The Godhead', listing());
+    const list = (await call('steve', 'GET', '/v1/content/entries')).body.entries;
+    expect(list.find((entry: { id: string }) => entry.id === id).cover).toMatchObject({ kind: 'image', portraitUrl: `https://cdn.test/apps/hearken/media/${'1'.padStart(64, '0')}.jpg` });
+    expect(list.find((entry: { title: string }) => entry.title === 'The Godhead').cover).toEqual(templateCover);
+    expect((await call('steve', 'GET', `/v1/content/entries/${id}`)).body.entry.cover.kind).toBe('image');
+    expect((await call('steve', 'GET', '/v1/content/authors/me')).body.photoMediaId).toBeNull();
+    const me = await call('steve', 'PUT', '/v1/content/authors/me', { name: 'Steve Warren', bio: '', color: '#2C3766', photoMediaId: photo });
+    expect(me.body).toMatchObject({ photoMediaId: photo, photoUrl: `https://cdn.test/apps/hearken/media/${'4'.padStart(64, '0')}.jpg` });
+    // The catalog's authors don't carry media ids.
+    expect('photoMediaId' in (await call(null, 'GET', '/v1/content/hearken/catalog?format=2')).body.authors[0]).toBe(false);
+  });
+
+  it('keeps old builds’ catalog rows free-only', async () => {
+    await publishModule('steve', 'The Godhead', listing());
+    await publishModule('steve', 'Temples', listing({ title: 'Temples', access: 'plus' }));
+    const [row] = await sql`select entries, entries_v2 from content_catalogs where app_key = 'hearken'`;
+    expect((row!.entries as { slug: string }[]).map((entry) => entry.slug)).toEqual(['the-godhead']);
+    for (const entry of row!.entries as Record<string, unknown>[]) expect(Object.keys(entry).sort()).toEqual(['bytes', 'hash', 'id', 'publishedAt', 'schemaVersion', 'slug', 'title', 'type', 'url', 'version']);
+    expect((row!.entries_v2 as { slug: string }[]).map((entry) => entry.slug)).toEqual(['temples', 'the-godhead']);
+  });
+
   it('forgets a deleted account’s ratings and reports', async () => {
     const { id } = await publishModule('steve', 'The Godhead', listing());
     const service = createContentService(sql, { storage });
@@ -547,5 +627,8 @@ describe.skipIf(!url)('Collections (Postgres)', () => {
     const [entry] = await sql`select rating_count, rating_average from content_entries where id = ${id}`;
     expect({ count: entry!.rating_count, average: Number(entry!.rating_average) }).toEqual({ count: 1, average: 5 });
     expect(await sql`select 1 from content_collection_reports`).toHaveLength(0);
+    await service.forgetUser(steve);
+    const [profile] = await sql`select name, bio, photo_media_id from content_authors where user_id = ${steve}`;
+    expect(profile).toEqual({ name: 'Former author', bio: '', photo_media_id: null });
   });
 });
