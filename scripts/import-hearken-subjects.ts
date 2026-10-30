@@ -89,7 +89,7 @@ type Look = { title: string; cover: string; template: 'orbit' | 'horizon' | 'ecl
 
 /** Each subject's listing title (34 at most), cover title (22 or under), cover and categories. */
 export const LOOKS: Record<string, Look> = {
-  'lds-doctrine': { title: 'Latter-day Saint Doctrine', cover: 'Latter-day Saint Doctrine', template: 'orbit', palette: 'midnight', categories: ['Doctrine', 'Scholar Path'] },
+  'lds-doctrine': { title: 'Latter-day Saint Doctrine', cover: 'LDS Doctrine', template: 'orbit', palette: 'midnight', categories: ['Doctrine', 'Scholar Path'] },
   'doctrinal-mastery': { title: 'Doctrinal Mastery', cover: 'Doctrinal Mastery', template: 'type', palette: 'harbor', categories: ['Doctrine', 'Scripture'] },
   'bofm-history': { title: 'Book of Mormon Narrative', cover: 'Book of Mormon', template: 'horizon', palette: 'terracotta', categories: ['Scripture', 'History'] },
   'biblical-timeline': { title: 'Biblical Timeline', cover: 'Biblical Timeline', template: 'eclipse', palette: 'parchment', categories: ['Bible', 'History'] },
@@ -99,7 +99,7 @@ export const LOOKS: Record<string, Look> = {
   'world-faiths': { title: 'World Faiths', cover: 'World Faiths', template: 'orbit', palette: 'saffron', categories: ['World religions'] },
   'biblical-geography': { title: 'Biblical Geography', cover: 'Biblical Geography', template: 'horizon', palette: 'harbor', categories: ['Bible', 'Geography'] },
   'textual-scholarship': { title: 'Scriptural Texts & Transmission', cover: 'Scriptural Texts', template: 'type', palette: 'parchment', categories: ['Scripture', 'Scholarship'] },
-  'early-church-fathers': { title: 'Early Christian Writers', cover: 'Early Christian Writers', template: 'eclipse', palette: 'midnight', categories: ['History', 'Christianity'], mirror: true },
+  'early-church-fathers': { title: 'Early Christian Writers', cover: 'Early Church Writers', template: 'eclipse', palette: 'midnight', categories: ['History', 'Christianity'], mirror: true },
 };
 
 /** The summary as an about (180 at most): whole sentences while they fit, else cut at a word. */

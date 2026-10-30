@@ -15,7 +15,8 @@
     "test:watch": "vitest",
     "check": "npm run typecheck && npm test",
     "entitlements": "tsx --env-file=.env.hearth-production scripts/set-entitlements.ts",
-    "dev-session": "tsx --env-file=.env.hearth-production scripts/dev-session.ts"
+    "dev-session": "tsx --env-file=.env.hearth-production scripts/dev-session.ts",
+    "import:hearken": "tsx --env-file-if-exists=.env.hearth-production scripts/import-hearken-subjects.ts"
   },
   "dependencies": {
     "@hono/node-server": "2.1.4",
