@@ -482,15 +482,22 @@ export function buildCatalogEntry(options: {
     sha256: options.sha256, downloadBytes: options.bytes + options.mediaBytes, access, downloadable,
     listing: listing ? {
       title: listing.title, about: listing.about, categories: listing.categories,
-      cover: !cover ? null : cover.kind === 'template' ? { ...cover } : {
-        kind: 'image', portraitUrl: options.mediaUrl(cover.portrait) ?? '', squareUrl: options.mediaUrl(cover.square) ?? '',
-        wideUrl: options.mediaUrl(cover.wide) ?? '', focal: cover.focal, showTitle: cover.showTitle, scrim: cover.scrim, title: cover.title,
-      },
+      cover: catalogCover(cover, options.mediaUrl),
     } : null,
     authorId: downloadable ? options.authorId : null,
     count: downloadable ? { n, one: options.settings!.unit.one, many: options.settings!.unit.many } : null,
     ...(rating ? { rating } : {}),
     updatedAt: options.publishedAt,
+  };
+}
+
+/** A cover as the apps and the Content table read it: image media ids become URLs ("" when missing). */
+export function catalogCover(cover: CoverSpec | null | undefined, mediaUrl: (mediaId: string) => string | null): CatalogCover | null {
+  if (!cover) return null;
+  if (cover.kind === 'template') return { ...cover };
+  return {
+    kind: 'image', portraitUrl: mediaUrl(cover.portrait) ?? '', squareUrl: mediaUrl(cover.square) ?? '',
+    wideUrl: mediaUrl(cover.wide) ?? '', focal: cover.focal, showTitle: cover.showTitle, scrim: cover.scrim, title: cover.title,
   };
 }
 

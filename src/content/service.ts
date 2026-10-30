@@ -4,11 +4,11 @@ import { ApiError } from '../errors.js';
 import { isUniqueViolation } from '../hearken/service.js';
 import { VersionConflict } from '../studio/documents.js';
 import {
-  BLOCK_LIBRARY, COVERS, asCatalogV1, asCatalogV2, bodySchema, buildBundle, buildCatalogEntry, catalogRating, coverMediaIds,
+  BLOCK_LIBRARY, COVERS, asCatalogV1, asCatalogV2, bodySchema, buildBundle, buildCatalogEntry, catalogCover, catalogRating, coverMediaIds,
   definitionSchema, diffBodies, diffListings, emptyBody, initialsOf, listingSchema, mediaIds, runChecks, slugify, stableJson,
 } from './model.js';
 import type {
-  Body, CatalogEntry, CatalogEntryV2, Check, Listing, MediaFile, MediaInfo, MonogramColor, TypeDefinition,
+  Body, CatalogCover, CatalogEntry, CatalogEntryV2, Check, Listing, MediaFile, MediaInfo, MonogramColor, TypeDefinition,
 } from './model.js';
 
 /**
@@ -47,6 +47,8 @@ export type EntrySummary = {
   id: string; app: string; typeId: string; typeSlug: string; typeName: string; slug: string; title: string;
   ownerId: string; ownerName: string | null; latestVersion: number; liveVersion: number | null;
   state: VersionState; scheduledFor: string | null; createdAt: string; updatedAt: string;
+  /** The latest version's listing cover (image ids as URLs), for thumbnails; null without one. */
+  cover: CatalogCover | null;
 };
 export type ReviewView = { step: string; state: 'pending' | 'approved' | 'changes_requested'; reviewerId: string | null; reviewerName: string | null; note: string | null; decidedAt: string | null };
 export type VersionView = {
@@ -86,11 +88,12 @@ const typeView = (row: Record<string, unknown>): ContentTypeView => ({
   definition: definitionSchema.parse(row.definition), updatedAt: iso(row.updated_at),
 });
 
-const summary = (row: Record<string, unknown>): EntrySummary => ({
+const summary = (row: Record<string, unknown>, mediaUrl: (mediaId: string) => string | null = () => null): EntrySummary => ({
   id: String(row.id), app: String(row.app_key), typeId: String(row.type_id), typeSlug: String(row.type_slug), typeName: String(row.type_name),
   slug: String(row.slug), title: String(row.title), ownerId: String(row.owner_id), ownerName: (row.owner_name as string | null) ?? null,
   latestVersion: Number(row.latest_version), liveVersion: row.live_version == null ? null : Number(row.live_version),
   state: row.state as VersionState, scheduledFor: isoOrNull(row.scheduled_for), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
+  cover: catalogCover(listingOf(row.listing)?.cover, mediaUrl),
 });
 
 /** A save lost a race with another one. */
@@ -114,7 +117,7 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
   }
 
   const entrySelect = (db: Sql) => db`
-    select e.*, t.slug as type_slug, t.name as type_name, m.display_name as owner_name, v.state,
+    select e.*, t.slug as type_slug, t.name as type_name, m.display_name as owner_name, v.state, v.listing,
       (select min(r.scheduled_for) from content_releases r where r.entry_id = e.id and r.state = 'scheduled') as scheduled_for
     from content_entries e
     join content_types t on t.id = e.type_id
@@ -465,14 +468,17 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
           ${filter.app ? sql`and e.app_key = ${filter.app}` : sql``}
           ${filter.typeId ? sql`and e.type_id = ${filter.typeId}` : sql``}
         order by e.updated_at desc`;
-      return rows.map(summary);
+      const media = await mediaMap(sql, teamId, [...new Set(rows.flatMap((row) => coverMediaIds(listingOf(row.listing))))]);
+      return rows.map((row) => summary(row, (mediaId) => (media.has(mediaId) ? storage().publicUrl(String(media.get(mediaId)!.path)) : null)));
     },
 
     async entry(teamId: string, id: string) {
       const row = await entryRow(sql, teamId, id);
       const type = await typeRow(sql, teamId, String(row.type_id));
       const version = await versionRow(sql, id, Number(row.latest_version));
-      return { entry: summary(row), type, version, reviews: await reviewsFor(sql, id, version.version) };
+      const media = await mediaMap(sql, teamId, coverMediaIds(listingOf(row.listing)));
+      const entry = summary(row, (mediaId) => (media.has(mediaId) ? storage().publicUrl(String(media.get(mediaId)!.path)) : null));
+      return { entry, type, version, reviews: await reviewsFor(sql, id, version.version) };
     },
 
     async createEntry(teamId: string, actor: string, input: { app: string; typeId: string; title: string; slug?: string | undefined }) {
