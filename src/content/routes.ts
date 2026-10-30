@@ -631,7 +631,7 @@ export function registerContent(app: OpenAPIHono<ApiEnvironment>, dependencies: 
 
   app.openapi(route({
     method: 'put', path: '/v1/content/catalogs/{app}/featured',
-    summary: 'Feature up to five items published in the app (publishers); bumps the catalog version',
+    summary: 'Feature up to five items published in the app (publishers); changes the format-2 ETag, not the catalog version',
     request: { params: catalogParam, ...body(featuredItems) }, responses: { 200: anyJson('{ items }'), ...errors },
   }), async (context) => {
     const caller = need(context, context.req.valid('param').app, 'publisher');
