@@ -105,13 +105,20 @@ diffs, bundles), `service.ts` (storage and publishing) and `routes.ts`.
   2. deploy hearth-api,
   3. `20261031100000_learning_module_listing_after_deploy.sql` (makes learning modules Collections;
      the old API can't read that type, so undo it before rolling the API back).
+  4. `20261031120000_collections_app_types.sql` (after a hearth-api with the recipe blocks is live):
+     Sated's and Suffice's article collections, Suffice's learning module and BigTable's recipe
+     collection. Type slugs become unique per app. Recipes use the `ingredients` and `steps` blocks
+     (`src/content/recipe-blocks.ts`; `unit` is one of BigTable's measurement values) and a `Recipe`
+     section's `image` field. Bundles list every image they use (blocks and image fields) in `media`
+     (`{ id, type: "image", url, width, height, alt }`), so a recipe's photo downloads with it.
 - **Write with AI**: `POST /v1/content/entries/generate` (`src/content/write-with-ai.ts`) takes
   `{ app (or null for shared), typeId, prompt (10–4000), length: short|medium|long, access: free|plus }`,
   needs the author role on the app, and answers `text/event-stream`: one `data: <json>` per event,
   `status` → `outline` → a `section` per finished section → `done { entryId, title, warnings }`, or
   `error { code, message }` with nothing saved. Claude (`CONTENT_AI_MODEL`, default the ad-copy
   Sonnet) plans an outline, then writes each section (three at a time) through tool calls, using
-  only text, callout, quiz, match and timeline blocks (plus scripture for Hearken's types) that the
+  only text, callout, quiz, match and timeline blocks (plus scripture for Hearken's types, and
+  ingredients and steps for BigTable's) that the
   type allows. Blocks are checked with `blockSchema` and `runChecks`, sent back once with the errors,
   then dropped with a warning. The draft (and a Collection's listing with a template cover) is saved
   through `createEntry` → `saveDraft` → `saveListing` and the audit log gets a `generate` row. Before
