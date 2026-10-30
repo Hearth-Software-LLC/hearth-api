@@ -131,7 +131,7 @@ describe.skipIf(!url)('Hearth Content (Postgres)', () => {
 
   const moduleType = async () => {
     const types = await call('steve', 'GET', '/v1/content/types');
-    return types.body.types.find((type: { slug: string }) => type.slug === 'learning-module');
+    return types.body.types.find((type: { slug: string; app: string | null }) => type.slug === 'learning-module' && type.app === 'hearken');
   };
 
   it('shares one profile photo between Hearth Studio and Hearth Content', async () => {

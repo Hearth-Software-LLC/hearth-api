@@ -2,6 +2,7 @@ import { z } from '@hono/zod-openapi';
 import { ApiError } from '../errors.js';
 import { ACCESS, BLOCK_LIBRARY, COVERS, COVER_TEMPLATES, PALETTE_IDS, blockSchema, listingSchema, runChecks, slugify } from './model.js';
 import type { Block, BlockKind, Body, FieldDef, Listing, Section, TypeDefinition } from './model.js';
+import { MEASUREMENTS, MEASUREMENT_VALUES } from './recipe-blocks.js';
 import type { ContentService, ContentTypeView } from './service.js';
 
 /**
@@ -20,8 +21,10 @@ import type { ContentService, ContentTypeView } from './service.js';
  */
 
 export const DEFAULT_CONTENT_MODEL = 'claude-sonnet-5-5';
-/** The blocks Claude may write: never media (it can't make any), links, steps or assessments. */
+/** The blocks Claude may write: never media (it can't make any), links, Scholar Path steps or assessments. */
 export const AI_BLOCKS = ['text', 'callout', 'quiz', 'match', 'timeline'] as const;
+/** Blocks Claude may also write, but only for one app's types: Hearken's scripture, BigTable's recipe blocks. */
+export const AI_APP_BLOCKS: Partial<Record<BlockKind, string>> = { scripture: 'hearken', ingredients: 'bigtable', steps: 'bigtable' };
 export const LENGTHS = ['short', 'medium', 'long'] as const;
 export type Length = typeof LENGTHS[number];
 /** Section calls running at once. */
@@ -94,10 +97,12 @@ export function typeForAi<T extends Pick<ContentTypeView, 'app' | 'slug' | 'defi
   };
 }
 
-/** The blocks Claude may use in a type: the AI blocks it allows, plus scripture for Hearken's types. */
+/** The blocks Claude may use in a type: the AI blocks it allows, plus scripture for Hearken's types and ingredients and steps for BigTable's. */
 export function aiBlocks(type: Pick<ContentTypeView, 'app' | 'definition'>): BlockKind[] {
-  return type.definition.blocks.filter((kind) => (AI_BLOCKS as readonly string[]).includes(kind) || (kind === 'scripture' && type.app === 'hearken'));
+  return type.definition.blocks.filter((kind) => (AI_BLOCKS as readonly string[]).includes(kind) || (AI_APP_BLOCKS[kind] !== undefined && AI_APP_BLOCKS[kind] === type.app));
 }
+
+const recipeBlocks = (blocks: BlockKind[]) => blocks.includes('ingredients') && blocks.includes('steps');
 
 // MARK: Prompts
 
@@ -150,6 +155,40 @@ const BLOCK_SHAPES: Partial<Record<BlockKind, { shape: string; rules: string; sc
       required: ['type', 'events'],
     },
   },
+  ingredients: {
+    shape: '{"type": "ingredients", "title": "", "items": [{"amount": 2, "unit": "cup", "name": "plain flour", "note": "sifted"}, {"amount": 1, "unit": null, "name": "egg", "note": ""}, {"amount": null, "unit": null, "name": "salt", "note": "to taste"}]}',
+    rules: `Every ingredient the recipe uses, in the order they're used. "amount": a number (0.5, not "1/2"), or null when there isn't one ("to taste"). "unit": exactly one of ${MEASUREMENT_VALUES.map((value) => `"${value}"`).join(', ')}, or null for a count ("2 eggs": amount 2, unit null) or no amount. "name": the ingredient alone, lower case; preparation goes in "note" ("finely chopped"; "" for none). "title": "" for one list, or a group like "For the sauce" when a recipe has parts (one ingredients block per group).`,
+    schema: {
+      type: 'object',
+      properties: {
+        type: { const: 'ingredients' }, title: { type: 'string' },
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              amount: { type: ['number', 'null'] }, unit: { anyOf: [{ type: 'string', enum: [...MEASUREMENT_VALUES] }, { type: 'null' }] },
+              name: { type: 'string' }, note: { type: 'string' },
+            },
+            required: ['amount', 'unit', 'name'],
+          },
+        },
+      },
+      required: ['type', 'items'],
+    },
+  },
+  steps: {
+    shape: '{"type": "steps", "title": "", "items": [{"text": "Heat the oven to 200°C (400°F)."}, {"text": "…"}]}',
+    rules: 'The method, one action or a few closely linked actions per step, in order, with times and temperatures (both °C and °F) where they matter. No numbering in the text: the app numbers them. "title": "" unless the ingredients are grouped, then match the group ("For the sauce").',
+    schema: {
+      type: 'object',
+      properties: {
+        type: { const: 'steps' }, title: { type: 'string' },
+        items: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } },
+      },
+      required: ['type', 'items'],
+    },
+  },
   scripture: {
     shape: '{"type": "scripture", "ref": "Alma 32:21", "text": "The verse text.", "highlight": false}',
     rules: 'A complete reference ("1 Nephi 3:7", "D&C 130:22", "John 3:16-17"). Quote the verse text word for word from the Latter-day Saint edition of the scriptures; if you are not certain of the exact words, leave "text" empty ("") and the author will fill it in. "highlight": true for the one passage a section centres on.',
@@ -178,7 +217,8 @@ export function systemPrompt(appKey: string, type: TypeLike): string {
     '- Clear, warm, plain language for a thoughtful general reader. Short sentences, concrete examples, no jargon without a quick explanation.',
     '- No hype, no superlatives, no exclamation marks, no emoji, no "unlock", "journey", "dive in" or "game-changer".',
     '- Accurate. Never invent statistics, studies, quotes, prices, names, links or dates. If you are unsure of a fact, leave it out.',
-    '- Scripture and doctrine: stay descriptive and faithful to what the scriptures and The Church of Jesus Christ of Latter-day Saints teach; cite references; no speculation or personal interpretation presented as doctrine.',
+    // Hearken's rule: the other apps' writers don't need doctrine in their brief.
+    ...(appKey === 'hearken' || blocks.includes('scripture') ? ['- Scripture and doctrine: stay descriptive and faithful to what the scriptures and The Church of Jesus Christ of Latter-day Saints teach; cite references; no speculation or personal interpretation presented as doctrine.'] : []),
     '- Money and health: general education only. No personalised financial, medical or nutritional advice; suggest a professional where it matters.',
     '- Address the reader as "you". Every section should teach something specific, not restate the title.',
     '',
@@ -198,9 +238,12 @@ export function systemPrompt(appKey: string, type: TypeLike): string {
     const spec = BLOCK_SHAPES[kind]!;
     lines.push(`- ${kind}: ${BLOCK_LIBRARY[kind].description} ${spec.shape}`, `  ${spec.rules}`);
   }
+  const recipes = recipeBlocks(blocks) && definition.sections !== null;
   lines.push(
     'Use no other block types: no images, videos or links (you cannot make media; the author adds it).',
-    blocks.length > 1 ? 'Mix the blocks: mostly text, with a callout for the key idea and a quiz or game where it helps people remember.' : '',
+    recipes
+      ? `Each ${(sectionLabel ?? 'recipe').toLowerCase()} is one recipe a home cook can follow: an ingredients block, then a steps block (a pair per group when it has parts), with a text block or a callout only for a short tip worth knowing. Recipes you are confident work, with quantities that match the servings. Leave the photo to the author.`
+      : blocks.length > 1 ? 'Mix the blocks: mostly text, with a callout for the key idea and a quiz or game where it helps people remember.' : '',
   );
   return lines.filter((line, index, all) => line !== '' || (all[index - 1] ?? '') !== '').join('\n').trim();
 }
@@ -361,6 +404,24 @@ const fixesInput = z.object({ fixes: z.array(z.object({ number: z.number().int()
 // MARK: Checking blocks
 
 const str = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+
+/** A unit as Claude wrote it, as one of BigTable's values: its value, label or short label in any case ("Tablespoon", "TBSP"). */
+export function toUnit(value: unknown): string | null {
+  const word = str(value).toLowerCase().replace(/\.$/, '');
+  if (!word || word === '—' || word === 'none' || word === 'null') return null;
+  const found = MEASUREMENTS.find((measurement) => measurement.value === word || measurement.label.toLowerCase() === word || measurement.short === word);
+  return found?.value ?? word;
+}
+
+/** An amount as a number: numbers as they are, "1.5" and "1/2" read, anything else null. */
+function toAmount(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const text = str(value);
+  const fraction = /^(\d+)\s*\/\s*(\d+)$/.exec(text);
+  if (fraction) return Number(fraction[2]) > 0 ? Math.round((Number(fraction[1]) / Number(fraction[2])) * 1000) / 1000 : null;
+  const number = text ? Number(text) : Number.NaN;
+  return Number.isFinite(number) ? number : null;
+}
 const cut = (value: string, max: number) => ([...value].length <= max ? value : [...value].slice(0, max).join('').trim());
 
 /**
@@ -391,6 +452,15 @@ export function toBlock(raw: unknown, id: string, allowed: BlockKind[], definiti
     case 'timeline':
       candidate = { id, type: kind, events: list(value.events).map((event, n) => ({ id: `${id}e${n + 1}`, date: str(event.date), label: str(event.label) })) };
       break;
+    case 'ingredients':
+      candidate = {
+        id, type: kind, title: cut(str(value.title), 60),
+        items: list(value.items).map((item, n) => ({ id: `${id}i${n + 1}`, amount: toAmount(item.amount), unit: toUnit(item.unit), name: str(item.name), note: str(item.note) })),
+      };
+      break;
+    case 'steps':
+      candidate = { id, type: kind, title: cut(str(value.title), 60), items: list(value.items).map((item, n) => ({ id: `${id}s${n + 1}`, text: str(item.text) })) };
+      break;
     default:
       return { errors: [`type "${kind}" isn’t allowed here; use one of ${allowed.join(', ')}`] };
   }
@@ -402,6 +472,14 @@ export function toBlock(raw: unknown, id: string, allowed: BlockKind[], definiti
   const errors: string[] = [];
   if ((block.type === 'text' || block.type === 'callout') && !block.text) errors.push('text is empty');
   if (block.type === 'callout' && !block.label) errors.push('label is empty');
+  if (block.type === 'ingredients') {
+    if (block.items.length === 0) errors.push('needs at least one ingredient');
+    if (block.items.some((item) => !item.name)) errors.push('every ingredient needs a name');
+  }
+  if (block.type === 'steps') {
+    if (block.items.length === 0) errors.push('needs at least one step');
+    if (block.items.some((item) => !item.text)) errors.push('every step needs text');
+  }
   // The publish checks a lone block must pass (quiz answers, game rows, scripture references).
   const checks = runChecks({
     appKey: '', definition: { ...definition, fields: [], sections: null, reviewSteps: [], listing: null },

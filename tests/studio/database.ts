@@ -15,6 +15,8 @@ export const STUDIO_MIGRATIONS = [
   '20261030120000_hearth_content.sql',
   '20261031090000_content_collections.sql',
   '20261031100000_learning_module_listing_after_deploy.sql',
+  '20261031110000_learning_module_v2.sql',
+  '20261031120000_collections_app_types.sql',
 ];
 
 export const STUDIO_TABLES = [
@@ -54,7 +56,7 @@ export async function migrate(sql: postgres.Sql): Promise<() => Promise<void>> {
 }
 
 /** The content types the content migration starts with. */
-const SEEDED_TYPES = ['learning-module', 'help-article', 'whats-new', 'onboarding'];
+const SEEDED_TYPES = ['learning-module', 'help-article', 'whats-new', 'onboarding', 'article', 'recipe-collection'];
 
 /** Empties everything but the team row and the starting content types the migrations made. */
 export async function reset(sql: postgres.Sql) {

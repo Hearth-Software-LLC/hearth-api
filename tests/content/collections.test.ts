@@ -321,7 +321,7 @@ describe.skipIf(!url)('Collections (Postgres)', () => {
   /** Makes, lists and publishes a learning module as `who` (steve publishes). */
   async function publishModule(who: string, title: string, value: Listing | null, extraBlocks: unknown[] = []) {
     const types = (await call('steve', 'GET', '/v1/content/types')).body.types;
-    const type = types.find((entry: { slug: string }) => entry.slug === 'learning-module');
+    const type = types.find((entry: { slug: string; app: string | null }) => entry.slug === 'learning-module' && entry.app === 'hearken');
     const created = await call(who, 'POST', '/v1/content/entries', { app: 'hearken', typeId: type.id, title });
     const id = created.body.entry.id as string;
     const lessons = { fields: { subject: 'Doctrine' }, sections: [
@@ -338,7 +338,7 @@ describe.skipIf(!url)('Collections (Postgres)', () => {
   it('saves listings like drafts and checks them before publishing', async () => {
     await join('author', { post: false, content: { role: 'author', apps: ['hearken'] } });
     const types = (await call('steve', 'GET', '/v1/content/types')).body.types;
-    expect(types.find((entry: { slug: string }) => entry.slug === 'learning-module').definition.listing).toEqual({ downloadable: true, unit: { one: 'lesson', many: 'lessons' }, countFrom: 'sections' });
+    expect(types.find((entry: { slug: string; app: string | null }) => entry.slug === 'learning-module' && entry.app === 'hearken').definition.listing).toEqual({ downloadable: true, unit: { one: 'lesson', many: 'lessons' }, countFrom: 'sections' });
     expect(types.find((entry: { slug: string }) => entry.slug === 'help-article').definition.listing).toBeNull();
 
     const { id, published } = await publishModule('author', 'The Godhead', null);
