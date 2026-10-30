@@ -591,6 +591,11 @@ async function apply(results: { converted: Converted }[], author: string) {
   try {
     const service = createContentService(sql);
     const teamId = await service.teamId();
+    if (author.includes('@')) {
+      const [user] = await sql<{ id: string }[]>`select id from auth.users where lower(email) = lower(${author})`;
+      if (!user) throw new Error(`No Hearth account with the email ${author}`);
+      author = user.id;
+    }
     const [member] = await sql`select 1 from studio_members where team_id = ${teamId} and user_id = ${author}`;
     if (!member) throw new Error(`${author} isn't a member of the Hearth Software team`);
     const type = (await service.types(teamId)).find((candidate) => candidate.slug === 'learning-module' && candidate.app === 'hearken');
@@ -634,12 +639,12 @@ async function main() {
     },
   });
   if (values.help || positionals.length !== 1) {
-    console.log('Usage: npm run import:hearken -- <Hearken/Resources/Content> [--dry-run | --apply --author=<user id>] [--out=<dir>] [--only=<subject id,…>]');
+    console.log('Usage: npm run import:hearken -- <Hearken/Resources/Content> [--dry-run | --apply --author=<user id or email>] [--out=<dir>] [--only=<subject id,…>]');
     process.exit(values.help ? 0 : 1);
   }
   if (values.apply && values['dry-run']) throw new Error('Use --dry-run or --apply, not both');
   if (values.apply && !values.author) throw new Error('--apply needs --author=<user id>');
-  if (values.author && !/^[0-9a-f-]{36}$/i.test(values.author)) throw new Error('--author must be a user id (uuid)');
+  if (values.author && !/^[0-9a-f-]{36}$/i.test(values.author) && !/^[^@\s]+@[^@\s]+$/.test(values.author)) throw new Error('--author must be a user id (uuid) or an account email');
 
   const source = readSource(resolve(positionals[0]!));
   const only = values.only ? new Set(values.only.split(',').map((id) => id.trim())) : undefined;
