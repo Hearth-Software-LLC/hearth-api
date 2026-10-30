@@ -107,6 +107,28 @@ diffs, bundles), `service.ts` (storage and publishing) and `routes.ts`.
      the old API can't read that type, so undo it before rolling the API back).
 - **Tests**: `tests/content/` (set `SOCIAL_TEST_DATABASE_URL` for the Postgres ones).
 
+### Importing Hearken's subjects
+
+Hearken's bundled Subjects and Scholar Path move into Hearth Content as learning-module drafts
+(one per subject, slug = the Hearken subject id). The mapping, and what Hearken's installer does to
+rebuild its models with the same ids, is in `docs/hearken-collections-mapping.md`. It needs the
+learning-module type at schema 2: run `supabase/migrations/20261031110000_learning_module_v2.sql`
+first.
+
+```sh
+# Dry run (the default): converts, validates and checks every subject rebuilds exactly,
+# writes ./out/hearken-import/<subject>.json and prints a summary. No database needed.
+npm run import:hearken -- ../hearken/Hearken/Resources/Content
+
+# Create or update the drafts, owned by a Hearth Studio team member (DATABASE_URL from
+# .env.hearth-production). Never submits or publishes; re-running updates the same drafts.
+npm run import:hearken -- ../hearken/Hearken/Resources/Content --apply --author=<user id>
+```
+
+`--only=bofm-history,lds-doctrine` limits it to some subjects; `--out=<dir>` changes the dry run's
+folder. Any invalid body or listing, or any difference in the round trip, stops it before anything
+is written. Re-running over a draft that's in review sends it back to draft (like any save).
+
 ## Account deletion
 
 `DELETE /v1/me` deletes the caller's Hearth account for every app; `src/services/account-deletion.ts` holds the one implementation, which `DELETE /v1/bigtable/me` also uses. In order:
