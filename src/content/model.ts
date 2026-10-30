@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   assessmentBlockSchema, blockId, linkBlockSchema, matchExtras, questionExtras, scriptureExtras, stepBlockSchema, unresolvedReferences,
 } from './hearken-blocks.js';
+import { ingredientsBlockSchema, recipeIssues, stepsBlockSchema } from './recipe-blocks.js';
 
 /**
  * Hearth Content's model: content types, the block library, a draft's body, the checks a version
@@ -13,7 +14,7 @@ import {
 export const FIELD_TYPES = ['text', 'longtext', 'number', 'boolean', 'image'] as const;
 export type FieldType = typeof FIELD_TYPES[number];
 
-export const BLOCK_KINDS = ['text', 'scripture', 'callout', 'quiz', 'match', 'timeline', 'image', 'video', 'link', 'step', 'assessment'] as const;
+export const BLOCK_KINDS = ['text', 'scripture', 'callout', 'quiz', 'match', 'timeline', 'image', 'video', 'link', 'step', 'assessment', 'ingredients', 'steps'] as const;
 export type BlockKind = typeof BLOCK_KINDS[number];
 
 /** The block library. `app`: only that app's types may use the block. */
@@ -23,12 +24,14 @@ export const BLOCK_LIBRARY: Record<BlockKind, { label: string; description: stri
   callout: { label: 'Callout', description: 'A highlighted point, such as a key doctrine.' },
   quiz: { label: 'Quiz', description: 'A multiple-choice question with one correct answer.' },
   match: { label: 'Match game', description: 'Pairs to match.' },
-  timeline: { label: 'Timeline', description: 'Dated events in order.', app: 'hearken' },
+  timeline: { label: 'Timeline', description: 'Dated events in order.' },
   image: { label: 'Image', description: 'An uploaded image with alt text.' },
   video: { label: 'Video', description: 'A video link.' },
   link: { label: 'Link', description: 'A resource: a book, article or website, or a chapter Hearken opens.' },
   step: { label: 'Step', description: 'A Scholar Path learning item; the blocks after it are its content.', app: 'hearken' },
   assessment: { label: 'Assessment', description: 'A quiz drawn from a question pool, a rubric-scored essay, a checkpoint or exam.', app: 'hearken' },
+  ingredients: { label: 'Ingredients', description: 'A recipe’s ingredients: amount, unit, name and a note, optionally under a group title.', app: 'bigtable' },
+  steps: { label: 'Steps', description: 'A recipe’s method as numbered steps.', app: 'bigtable' },
 };
 
 const key = z.string().regex(/^[a-z][A-Za-z0-9]{0,39}$/);
@@ -166,6 +169,8 @@ export const blockSchema = z.discriminatedUnion('type', [
   linkBlockSchema,
   stepBlockSchema,
   assessmentBlockSchema,
+  ingredientsBlockSchema,
+  stepsBlockSchema,
 ]);
 export type Block = z.infer<typeof blockSchema>;
 
@@ -197,8 +202,34 @@ export function allBlocks(body: Body): { section: Section | null; block: Block }
   return (body.blocks ?? []).map((block) => ({ section: null, block }));
 }
 
-export function mediaIds(body: Body): string[] {
-  return [...new Set(allBlocks(body).flatMap(({ block }) => (block.type === 'image' && block.mediaId ? [block.mediaId] : [])))];
+/** The keys of a type's image fields, on the item and on each section. */
+export function imageFieldKeys(definition: Pick<TypeDefinition, 'fields' | 'sections'> | null | undefined): { item: string[]; section: string[] } {
+  const keys = (fields: FieldDef[] | undefined) => (fields ?? []).filter((field) => field.type === 'image').map((field) => field.key);
+  return { item: keys(definition?.fields), section: keys(definition?.sections?.fields) };
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The media ids a body's image fields hold, in order (only values that are media ids). */
+export function imageFieldMediaIds(body: Body, definition: Pick<TypeDefinition, 'fields' | 'sections'> | null | undefined): string[] {
+  const keys = imageFieldKeys(definition);
+  const pick = (values: Record<string, unknown>, names: string[]) =>
+    names.map((name) => values[name]).filter((value): value is string => typeof value === 'string' && UUID.test(value));
+  return [...pick(body.fields, keys.item), ...(body.sections ?? []).flatMap((section) => pick(section.fields, keys.section))];
+}
+
+/**
+ * Every uploaded image a body uses: image blocks, and (given the type's definition) image fields,
+ * like a recipe's photo. Publishing counts, lists and checks all of them.
+ */
+export function mediaIds(body: Body, definition?: Pick<TypeDefinition, 'fields' | 'sections'> | null): string[] {
+  const blocks = allBlocks(body).flatMap(({ block }) => (block.type === 'image' && block.mediaId ? [block.mediaId] : []));
+  return [...new Set([...blocks, ...imageFieldMediaIds(body, definition)])];
+}
+
+/** Whether a type's sections are recipes: BigTable's recipe collection (sections that use ingredients and steps). */
+export function isRecipeType(definition: Pick<TypeDefinition, 'sections' | 'blocks'>): boolean {
+  return definition.sections !== null && definition.blocks.includes('ingredients') && definition.blocks.includes('steps');
 }
 
 // MARK: Checks
@@ -282,6 +313,15 @@ export function runChecks(options: {
   if (games.length) checks.push({ id: 'games', label: 'Games are complete', state: 'fail', detail: `${games.length} match or timeline block${games.length === 1 ? '' : 's'} need at least two complete rows` });
 
   const images = blocks.flatMap(({ block }) => (block.type === 'image' ? [block] : []));
+  // Image fields that are set must point at a finished upload (whether they're set at all is the
+  // required-fields check's business).
+  const fieldKeys = imageFieldKeys(definition);
+  const fieldImages = [
+    ...fieldKeys.item.map((name) => body.fields[name]),
+    ...(body.sections ?? []).flatMap((section) => fieldKeys.section.map((name) => section.fields[name])),
+  ].filter((value) => filled(value));
+  const unsetFields = fieldImages.filter((value) => typeof value !== 'string' || !media.get(value)?.uploaded).length;
+  if (unsetFields) checks.push({ id: 'image-fields', label: 'Image fields are uploaded', state: 'fail', detail: `${unsetFields} image field${unsetFields === 1 ? '' : 's'} without a finished upload` });
   if (images.length) {
     const unset = images.filter((image) => !image.mediaId || !media.get(image.mediaId)?.uploaded).length;
     const noAlt = images.filter((image) => !(image.alt.trim() || (image.mediaId && media.get(image.mediaId)?.alt.trim()))).length;
@@ -299,6 +339,22 @@ export function runChecks(options: {
     checks.push(missing.length
       ? { id: 'references', label: 'Steps and assessments point at questions that exist', state: 'fail', detail: `Missing: ${missing.slice(0, 10).join(', ')}${missing.length > 10 ? ` and ${missing.length - 10} more` : ''}` }
       : { id: 'references', label: 'Steps and assessments point at questions that exist', state: 'pass' });
+  }
+
+  if (isRecipeType(definition)) {
+    const servingsField = definition.sections!.fields.find((field) => field.key === 'servings');
+    const imageKey = fieldKeys.section[0];
+    const bad = (body.sections ?? []).flatMap((section) => {
+      const value = imageKey === undefined ? null : section.fields[imageKey];
+      const issues = recipeIssues(section.blocks, {
+        hasServings: servingsField !== undefined, servings: section.fields.servings,
+        image: imageKey === undefined ? null : typeof value === 'string' && value.length > 0 && media.get(value)?.uploaded === true,
+      });
+      return issues.length ? [`“${section.title || 'Untitled'}”: ${issues.join(', ')}`] : [];
+    });
+    checks.push(bad.length
+      ? { id: 'recipes', label: `Every ${sectionLabel} has ingredients, steps, servings and an image`, state: 'fail', detail: bad.join('; ') }
+      : { id: 'recipes', label: `Every ${sectionLabel} has ingredients, steps, servings and an image`, state: 'pass' });
   }
 
   if (options.definition.listing?.downloadable) checks.push(...listingChecks(options.listing ?? null, media));
@@ -417,10 +473,17 @@ export function stableJson(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
-/** What an app downloads for one published version: images become URLs. */
+/**
+ * What an app downloads for one published version: image blocks become URLs. Image fields keep
+ * their media id, and `media` lists every image the bundle uses (blocks and fields) by id with its
+ * URL, so an app can find a field's image and the download manager fetches it with the rest
+ * (it collects every `{ "type": "image", "url" }` in a bundle). Left out when there are none.
+ */
 export function buildBundle(options: {
   entryId: string; app: string; typeSlug: string; slug: string; title: string; version: number; schemaVersion: number;
   publishedAt: string; body: Body; media: Map<string, MediaFile>;
+  /** The type's definition, to find image fields. */
+  definition?: Pick<TypeDefinition, 'fields' | 'sections'> | null;
 }) {
   const resolve = (block: Block) => {
     if (block.type !== 'image') return block;
@@ -432,9 +495,14 @@ export function buildBundle(options: {
     ...(options.body.sections ? { sections: options.body.sections.map((section) => ({ ...section, blocks: section.blocks.map(resolve) })) } : {}),
     ...(options.body.blocks ? { blocks: options.body.blocks.map(resolve) } : {}),
   };
+  const media = mediaIds(options.body, options.definition).flatMap((mediaId) => {
+    const file = options.media.get(mediaId);
+    return file ? [{ id: mediaId, type: 'image', url: file.url, width: file.width, height: file.height, alt: file.alt }] : [];
+  });
   const bundle = {
     id: options.entryId, app: options.app, type: options.typeSlug, slug: options.slug, title: options.title,
     version: options.version, schemaVersion: options.schemaVersion, publishedAt: options.publishedAt, body,
+    ...(media.length ? { media } : {}),
   };
   const json = stableJson(bundle);
   const bytes = new TextEncoder().encode(json);

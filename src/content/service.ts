@@ -169,7 +169,7 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
   }
 
   async function checksFor(db: Sql, teamId: string, entry: Record<string, unknown>, version: VersionView, type: ContentTypeView): Promise<Check[]> {
-    const media = await mediaMap(db, teamId, [...new Set([...mediaIds(version.body), ...coverMediaIds(version.listing)])]);
+    const media = await mediaMap(db, teamId, [...new Set([...mediaIds(version.body, type.definition), ...coverMediaIds(version.listing)])]);
     const info = new Map<string, MediaInfo>([...media].map(([id, row]) => [id, {
       id, uploaded: row.uploaded === true, alt: String(row.alt ?? ''),
       width: row.width == null ? null : Number(row.width), height: row.height == null ? null : Number(row.height),
@@ -186,7 +186,7 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
     const entry = await entryRow(sql, teamId, entryId);
     const type = await typeRow(sql, teamId, String(entry.type_id));
     const ver = await versionRow(sql, entryId, version);
-    const bodyMedia = await mediaMap(sql, teamId, mediaIds(ver.body));
+    const bodyMedia = await mediaMap(sql, teamId, mediaIds(ver.body, type.definition));
     const files = new Map<string, MediaFile>([...bodyMedia].map(([id, row]) => [id, {
       id, url: storage().publicUrl(String(row.path)), width: row.width == null ? null : Number(row.width),
       height: row.height == null ? null : Number(row.height), alt: String(row.alt ?? ''),
@@ -194,7 +194,7 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
     const publishedAt = new Date(now()).toISOString();
     const bundle = buildBundle({
       entryId, app: String(entry.app_key), typeSlug: type.slug, slug: String(entry.slug), title: String(entry.title),
-      version, schemaVersion: ver.schemaVersion, publishedAt, body: ver.body, media: files,
+      version, schemaVersion: ver.schemaVersion, publishedAt, body: ver.body, media: files, definition: type.definition,
     });
     const settings = type.definition.listing;
     const plus = settings?.downloadable === true && ver.listing?.access === 'plus';
@@ -440,7 +440,7 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
         await audit(sql, teamId, actor, 'type_create', String(row!.id), { slug: input.slug });
         return typeView(row!);
       } catch (error) {
-        if (isUniqueViolation(error)) throw new ApiError(409, 'SLUG_TAKEN', 'A content type already uses that slug');
+        if (isUniqueViolation(error)) throw new ApiError(409, 'SLUG_TAKEN', 'A content type in that app already uses that slug');
         throw error;
       }
     },
@@ -734,7 +734,7 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
       const ver = await versionRow(sql, id, Number(target.version));
       // The media the bundle uses, counted the same way publishing does. Releases from before
       // Collections have no full hash: the apps verify those with the 6-character one.
-      const media = await mediaMap(sql, teamId, mediaIds(ver.body));
+      const media = await mediaMap(sql, teamId, mediaIds(ver.body, type.definition));
       const mediaBytes = [...media.values()].reduce((sum, file) => sum + Number(file.bytes ?? 0), 0);
       const entry = await catalogEntryFor(sql, teamId, row, type, ver, {
         hash: String(target.hash), sha256: (target.sha256 as string | null) ?? '', bytes: Number(target.bytes), mediaBytes,
@@ -1065,7 +1065,7 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
   };
 }
 
-/** A type may only use blocks that exist for its app (scripture and timeline are Hearken's). */
+/** A type may only use blocks that exist for its app (scripture is Hearken's; ingredients and steps are BigTable's). */
 function checkBlocks(app: string | null, definition: TypeDefinition) {
   const wrong = definition.blocks.filter((kind) => {
     const only = BLOCK_LIBRARY[kind].app;
