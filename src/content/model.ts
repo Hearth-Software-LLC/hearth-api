@@ -34,11 +34,23 @@ export const fieldDefSchema = z.object({
 }).strict();
 export type FieldDef = z.infer<typeof fieldDefSchema>;
 
+/**
+ * Whether a type's items are Collections people download in the apps, and what one item counts in
+ * its lists ("6 lessons"). Null (the default, so older definitions stay valid): not downloadable.
+ */
+export const listingSettingsSchema = z.object({
+  downloadable: z.boolean(),
+  unit: z.object({ one: z.string().trim().min(1).max(20), many: z.string().trim().min(1).max(20) }).strict(),
+  countFrom: z.enum(['sections', 'blocks']),
+}).strict();
+export type ListingSettings = z.infer<typeof listingSettingsSchema>;
+
 export const definitionSchema = z.object({
   fields: z.array(fieldDefSchema).max(30).default([]),
   sections: z.object({ label: z.string().trim().min(1).max(30), fields: z.array(fieldDefSchema).max(20).default([]) }).strict().nullable().default(null),
   blocks: z.array(z.enum(BLOCK_KINDS)).min(1).max(BLOCK_KINDS.length),
   reviewSteps: z.array(z.string().trim().min(1).max(60)).max(5).default([]),
+  listing: listingSettingsSchema.nullable().default(null),
 }).strict().superRefine((value, context) => {
   const keys = value.fields.map((field) => field.key);
   if (new Set(keys).size !== keys.length) context.addIssue({ code: 'custom', message: 'Field keys must be unique' });
@@ -46,6 +58,84 @@ export const definitionSchema = z.object({
   if (new Set(value.reviewSteps).size !== value.reviewSteps.length) context.addIssue({ code: 'custom', message: 'Review steps must be unique' });
 });
 export type TypeDefinition = z.infer<typeof definitionSchema>;
+
+// MARK: Listing and covers
+
+export const PALETTE_IDS = ['midnight', 'harbor', 'pine', 'olive', 'terracotta', 'tomato', 'parchment', 'saffron'] as const;
+export type PaletteId = typeof PALETTE_IDS[number];
+export const COVER_TEMPLATES = ['orbit', 'horizon', 'eclipse', 'type'] as const;
+export const SCRIMS = ['light', 'medium', 'strong'] as const;
+export const ACCESS = ['free', 'plus'] as const;
+export type Access = typeof ACCESS[number];
+
+/** The smallest each image crop may be, and its shape. */
+export const CROP_SIZES = {
+  portrait: { width: 1600, height: 2000 },
+  square: { width: 1200, height: 1200 },
+  wide: { width: 2400, height: 1000 },
+} as const;
+export type CropName = keyof typeof CROP_SIZES;
+
+/** Cover titles longer than this get a warning; abouts shorter than this do. */
+export const COVER_TITLE_SHORT = 22;
+export const ABOUT_SHORT = 60;
+
+/**
+ * The cover templates, palettes and author colors: one list both renderers (web and iOS) read from
+ * GET /v1/content/covers. The shapes' geometry is in the Collections contract.
+ */
+export const COVERS = {
+  version: 1,
+  templates: [
+    { id: 'orbit', name: 'Orbit' },
+    { id: 'horizon', name: 'Horizon' },
+    { id: 'eclipse', name: 'Eclipse' },
+    { id: 'type', name: 'Type' },
+  ],
+  palettes: [
+    { id: 'midnight', name: 'Midnight', bg: '#2C3766', ink: '#EEF0FA', accent: '#5865A3' },
+    { id: 'harbor', name: 'Harbor', bg: '#24384A', ink: '#EAF0F4', accent: '#4F7896' },
+    { id: 'pine', name: 'Pine', bg: '#1F4A47', ink: '#E7F3F1', accent: '#4C8580' },
+    { id: 'olive', name: 'Olive', bg: '#3E4A2C', ink: '#F3EBDD', accent: '#7F8C4C' },
+    { id: 'terracotta', name: 'Terracotta', bg: '#6B3A2E', ink: '#F7ECE6', accent: '#A0604E' },
+    { id: 'tomato', name: 'Tomato', bg: '#B8432F', ink: '#FBEFE6', accent: '#E2805F' },
+    { id: 'parchment', name: 'Parchment', bg: '#C9B48A', ink: '#2A2212', accent: '#A08A55' },
+    { id: 'saffron', name: 'Saffron', bg: '#E8C547', ink: '#2A250F', accent: '#C79B1C' },
+  ],
+  monograms: ['#2C3766', '#24384A', '#1F4A47', '#3E4A2C', '#6B3A2E', '#A63A28', '#4A3A5C', '#7A5A22'],
+} as const satisfies { version: number; templates: { id: typeof COVER_TEMPLATES[number]; name: string }[]; palettes: { id: PaletteId; name: string; bg: string; ink: string; accent: string }[]; monograms: string[] };
+export type MonogramColor = typeof COVERS.monograms[number];
+
+const unit = z.number().min(0).max(1);
+export const coverSpecSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('template'), template: z.enum(COVER_TEMPLATES), palette: z.enum(PALETTE_IDS),
+    title: z.string().trim().min(1).max(40), mirror: z.boolean(), italic: z.boolean(),
+  }).strict(),
+  z.object({
+    kind: z.literal('image'), portrait: z.uuid(), square: z.uuid(), wide: z.uuid(),
+    focal: z.object({ x: unit, y: unit }).strict(), showTitle: z.boolean(), scrim: z.enum(SCRIMS),
+    title: z.string().trim().max(40),
+  }).strict(),
+]);
+export type CoverSpec = z.infer<typeof coverSpecSchema>;
+
+/** A Collection's listing: saved on each version and reviewed with it. */
+export const listingSchema = z.object({
+  /** Empty while it's being written; a check stops publishing until it's set. */
+  title: z.string().trim().max(34),
+  about: z.string().trim().max(180),
+  categories: z.array(z.string().trim().min(1).max(24)).max(3).refine((list) => new Set(list.map((entry) => entry.toLowerCase())).size === list.length, 'Categories are listed twice'),
+  access: z.enum(ACCESS),
+  cover: coverSpecSchema.nullable(),
+}).strict();
+export type Listing = z.infer<typeof listingSchema>;
+
+/** The cover's uploaded images, for checks and URLs. */
+export function coverMediaIds(listing: Listing | null | undefined): string[] {
+  const cover = listing?.cover;
+  return cover?.kind === 'image' ? [...new Set([cover.portrait, cover.square, cover.wide])] : [];
+}
 
 // MARK: Body
 
@@ -104,7 +194,7 @@ export function mediaIds(body: Body): string[] {
 // MARK: Checks
 
 export type Check = { id: string; label: string; state: 'pass' | 'warn' | 'fail'; detail?: string };
-export type MediaInfo = { id: string; uploaded: boolean; alt: string };
+export type MediaInfo = { id: string; uploaded: boolean; alt: string; width?: number | null; height?: number | null };
 
 /** "D&C 130:22", "1 Nephi 3:7", "Moses 1:39", "John 3:16-17, 19". */
 const SCRIPTURE_REF = /^(?:[1-4]\s)?[A-Za-z][A-Za-z&.' ]{0,40}\s\d{1,3}(?::\d{1,3}(?:[-–]\d{1,3})?(?:,\s?\d{1,3}(?:[-–]\d{1,3})?)*)?$/;
@@ -124,6 +214,8 @@ function filled(value: unknown) {
 export function runChecks(options: {
   appKey: string; definition: TypeDefinition; body: Body; media: Map<string, MediaInfo>;
   approvals: { step: string; approved: boolean }[];
+  /** The version's listing; only read for downloadable types. */
+  listing?: Listing | null;
 }): Check[] {
   const { definition, body, media } = options;
   const sectionLabel = definition.sections?.label.toLowerCase() ?? 'section';
@@ -190,6 +282,8 @@ export function runChecks(options: {
   const videos = blocks.filter(({ block }) => block.type === 'video' && !/^https:\/\/\S+$/.test(block.url.trim()));
   if (videos.length) checks.push({ id: 'video', label: 'Videos have https links', state: 'fail', detail: `${videos.length} video block${videos.length === 1 ? '' : 's'} need an https link` });
 
+  if (options.definition.listing?.downloadable) checks.push(...listingChecks(options.listing ?? null, media));
+
   if (options.approvals.length) {
     const waiting = options.approvals.filter((approval) => !approval.approved).map((approval) => approval.step);
     checks.push(waiting.length
@@ -197,6 +291,39 @@ export function runChecks(options: {
       : { id: 'approvals', label: 'Required approvals are in', state: 'pass' });
   }
   return checks;
+}
+
+/** The checks a Collection's listing adds: a cover, crops big enough, a title, and two nudges. */
+export function listingChecks(listing: Listing | null, media: Map<string, MediaInfo>): Check[] {
+  const checks: Check[] = [];
+  checks.push(listing?.title.trim()
+    ? { id: 'listing-title', label: 'The listing has a title', state: 'pass' }
+    : { id: 'listing-title', label: 'The listing has a title', state: 'fail', detail: 'Add a title under Cover & listing' });
+  const cover = listing?.cover ?? null;
+  checks.push(cover
+    ? { id: 'cover', label: 'A cover is set', state: 'pass' }
+    : { id: 'cover', label: 'A cover is set', state: 'fail', detail: 'Pick a template or upload an image under Cover & listing' });
+  if (cover?.kind === 'image') {
+    const short = (Object.keys(CROP_SIZES) as CropName[]).filter((crop) => !cropFits(crop, media.get(cover[crop])));
+    checks.push(short.length
+      ? { id: 'cover-crops', label: 'Cover images are big enough', state: 'fail', detail: short.map((crop) => `${crop} needs ${CROP_SIZES[crop].width}×${CROP_SIZES[crop].height} or larger`).join('; ') }
+      : { id: 'cover-crops', label: 'Cover images are big enough', state: 'pass' });
+  }
+  if (cover && cover.title.trim().length > COVER_TITLE_SHORT) {
+    checks.push({ id: 'cover-title', label: 'The cover title is short', state: 'warn', detail: `Over ${COVER_TITLE_SHORT} characters can be hard to read on small covers` });
+  }
+  if (listing && listing.about.trim().length < ABOUT_SHORT) {
+    checks.push({ id: 'about', label: 'The listing says what it’s about', state: 'warn', detail: `Under ${ABOUT_SHORT} characters: a sentence or two helps people choose` });
+  }
+  return checks;
+}
+
+/** Whether an uploaded image is big enough for a crop and close to its shape. */
+export function cropFits(crop: CropName, info: MediaInfo | undefined): boolean {
+  if (!info?.uploaded || !info.width || !info.height) return false;
+  const want = CROP_SIZES[crop];
+  const shape = Math.abs(info.width / info.height - want.width / want.height) <= 0.02 * (want.width / want.height);
+  return shape && info.width >= want.width && info.height >= want.height;
 }
 
 // MARK: Diff
@@ -250,6 +377,14 @@ export function diffBodies(before: Body | null, after: Body): Diff {
   };
 }
 
+const LISTING_FIELDS = ['title', 'about', 'categories', 'access', 'cover'] as const;
+
+/** Which listing fields changed from the live version (null: no listing) to the latest. */
+export function diffListings(before: Listing | null, after: Listing | null): { listingChanged: boolean; listingFields: string[] } {
+  const listingFields = LISTING_FIELDS.filter((field) => !same(before?.[field] ?? null, after?.[field] ?? null));
+  return { listingChanged: listingFields.length > 0, listingFields };
+}
+
 // MARK: Bundles
 
 export type MediaFile = { id: string; url: string; width: number | null; height: number | null; alt: string };
@@ -284,15 +419,108 @@ export function buildBundle(options: {
   };
   const json = stableJson(bundle);
   const bytes = new TextEncoder().encode(json);
-  const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 6);
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const hash = sha256.slice(0, 6);
   const folder = options.app === 'shared' ? 'shared' : `apps/${options.app}`;
-  return { bytes, hash, path: `${folder}/${options.typeSlug}/${options.slug}.v${options.version}.${hash}.json` };
+  return { bytes, hash, sha256, path: `${folder}/${options.typeSlug}/${options.slug}.v${options.version}.${hash}.json` };
 }
 
+/** A catalog entry as format 1 (today's apps) reads it. */
 export type CatalogEntry = {
   id: string; type: string; slug: string; title: string; version: number; schemaVersion: number;
   hash: string; url: string; bytes: number; publishedAt: string;
 };
+const FORMAT_1 = new Set(['id', 'type', 'slug', 'title', 'version', 'schemaVersion', 'hash', 'url', 'bytes', 'publishedAt']);
+
+export type CatalogCover =
+  | Extract<CoverSpec, { kind: 'template' }>
+  | { kind: 'image'; portraitUrl: string; squareUrl: string; wideUrl: string; focal: { x: number; y: number }; showTitle: boolean; scrim: 'light' | 'medium' | 'strong'; title: string };
+export type Rating = { average: number; count: number };
+
+/** A catalog entry as format 2 reads it (and as it's stored): format 1's fields plus the Collection's. */
+export type CatalogEntryV2 = CatalogEntry & {
+  sha256: string; downloadBytes: number; access: Access; downloadable: boolean;
+  listing: { title: string; about: string; categories: string[]; cover: CatalogCover | null } | null;
+  authorId: string | null;
+  count: { n: number; one: string; many: string } | null;
+  rating?: Rating;
+  updatedAt: string;
+};
+
+/** Ratings show in the apps once there are this many. */
+export const RATING_FLOOR = 5;
+
+/** The rating the catalog shows: one decimal, and nothing under the floor. */
+export function catalogRating(average: number | null, count: number): Rating | undefined {
+  if (count < RATING_FLOOR || average === null) return undefined;
+  return { average: Math.round(average * 10) / 10, count };
+}
+
+/**
+ * One item's catalog entry, from its rows: images in the cover become public URLs, the count comes
+ * from the body, and the rating only shows from five ratings. Plus items have no public URL.
+ */
+export function buildCatalogEntry(options: {
+  id: string; typeSlug: string; slug: string; title: string; version: number; schemaVersion: number;
+  hash: string; sha256: string; bytes: number; url: string; publishedAt: string;
+  /** Bytes of the media files the bundle references. */
+  mediaBytes: number;
+  settings: ListingSettings | null; listing: Listing | null; body: Body;
+  /** Public URL of an uploaded image, by media id. */
+  mediaUrl: (mediaId: string) => string | null;
+  authorId: string | null; rating: { average: number | null; count: number };
+}): CatalogEntryV2 {
+  const downloadable = options.settings?.downloadable === true;
+  const listing = downloadable ? options.listing : null;
+  const access: Access = listing?.access ?? 'free';
+  const cover = listing?.cover ?? null;
+  const n = !downloadable ? 0 : options.settings!.countFrom === 'sections' ? (options.body.sections ?? []).length : allBlocks(options.body).length;
+  const rating = downloadable ? catalogRating(options.rating.average, options.rating.count) : undefined;
+  return {
+    id: options.id, type: options.typeSlug, slug: options.slug, title: options.title, version: options.version, schemaVersion: options.schemaVersion,
+    hash: options.hash, url: access === 'plus' ? '' : options.url, bytes: options.bytes, publishedAt: options.publishedAt,
+    sha256: options.sha256, downloadBytes: options.bytes + options.mediaBytes, access, downloadable,
+    listing: listing ? {
+      title: listing.title, about: listing.about, categories: listing.categories,
+      cover: !cover ? null : cover.kind === 'template' ? { ...cover } : {
+        kind: 'image', portraitUrl: options.mediaUrl(cover.portrait) ?? '', squareUrl: options.mediaUrl(cover.square) ?? '',
+        wideUrl: options.mediaUrl(cover.wide) ?? '', focal: cover.focal, showTitle: cover.showTitle, scrim: cover.scrim, title: cover.title,
+      },
+    } : null,
+    authorId: downloadable ? options.authorId : null,
+    count: downloadable ? { n, one: options.settings!.unit.one, many: options.settings!.unit.many } : null,
+    ...(rating ? { rating } : {}),
+    updatedAt: options.publishedAt,
+  };
+}
+
+/** A stored entry as format 2 reads it; entries published before Collections get the defaults. */
+export function asCatalogV2(entry: CatalogEntry & Partial<CatalogEntryV2>): CatalogEntryV2 {
+  return {
+    ...entry,
+    sha256: entry.sha256 ?? '', downloadBytes: entry.downloadBytes ?? entry.bytes, access: entry.access ?? 'free',
+    downloadable: entry.downloadable ?? false, listing: entry.listing ?? null, authorId: entry.authorId ?? null,
+    count: entry.count ?? null, updatedAt: entry.updatedAt ?? entry.publishedAt,
+  };
+}
+
+/**
+ * A stored entry as format 1 reads it: only today's fields, in the order they're stored, so an entry
+ * published before Collections comes out byte for byte as before. Plus items: null (left out).
+ */
+export function asCatalogV1(entry: CatalogEntry & Partial<CatalogEntryV2>): CatalogEntry | null {
+  if (entry.access === 'plus') return null;
+  return Object.fromEntries(Object.entries(entry).filter(([name]) => FORMAT_1.has(name))) as CatalogEntry;
+}
+
+/** "Marisol Vega" → "MV"; one word → its first letter. */
+export function initialsOf(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return '';
+  const first = [...words[0]!][0] ?? '';
+  const last = words.length > 1 ? [...words[words.length - 1]!][0] ?? '' : '';
+  return (first + last).toUpperCase();
+}
 
 export function slugify(title: string): string {
   return title.normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/&/g, ' and ')

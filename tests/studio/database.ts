@@ -13,9 +13,11 @@ export const STUDIO_MIGRATIONS = [
   '20261029220000_studio_admin_role.sql',
   '20261029230000_monetization_plans.sql',
   '20261030120000_hearth_content.sql',
+  '20261031090000_content_collections.sql',
 ];
 
 export const STUDIO_TABLES = [
+  'content_collection_reports', 'content_ratings', 'content_authors',
   'content_audit_log', 'content_catalogs', 'content_releases', 'content_media', 'content_comments', 'content_reviews',
   'content_versions', 'content_entries', 'content_types', 'studio_invite_attempts',
   'monetization_plans',
