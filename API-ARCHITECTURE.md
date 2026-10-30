@@ -159,6 +159,18 @@ Tables: `social_connections`, `social_posts`, `social_targets` (one per account 
 
 Tables: `studio_teams`, `studio_members`, `studio_invites`, `plan_grants_log`, `studio_devices`, `library_runs`, `library_assets`, `marketing_campaigns`, `store_designs` (`20261029100000_studio_team.sql`, `20261029100100_studio_library.sql`). Tests: the same `SOCIAL_TEST_DATABASE_URL`.
 
+### Collections (Hearth Content)
+
+Collections are Hearth Content items people browse and download in the apps (`src/content`, `20261031090000_content_collections.sql`). A content type is a Collection when its definition has `listing.downloadable`; learning modules are, counted in lessons. Help articles and What's New are not.
+
+- **Listing:** each version carries a listing (title, about, up to three categories, Free or Plus, and a cover), saved with `PUT /v1/content/entries/{id}/listing` under the same revision rule as the draft and reviewed with it. Publishing checks that it has a title and a cover, and that image crops are big enough. `GET /v1/content/covers` is the one list of cover templates, palettes and author colors both renderers use.
+- **Storage:** free bundles go to the public `hearth-content` bucket as before; Plus bundles go to the private `hearth-content-plus` bucket. `POST /v1/content/{app}/items/{id}/download` returns the public URL for free items, or a 10-minute signed link for Plus after checking for `hearth_plus` or `<app>_plus` (own or the household organizer's; always signs when `ENFORCE_ENTITLEMENTS` is off). Nothing records who downloaded what.
+- **Catalog:** `GET /v1/content/{app}/catalog` stays as it was for older builds and leaves Plus items out. `?format=2` adds each item's listing, access, full sha256, download size (bundle plus the images it uses), author and rating, plus the app's featured list and its authors. Its ETag covers the catalog, shared, featured and authors versions.
+- **People in the apps** rate (`PUT …/items/{id}/rating`, one rating each) and report (`POST …/items/{id}/report`) with their normal Hearth token; they don't need the content team. Both are rate-limited. A rating recounts the item and refreshes its entry in the catalog in the same transaction; the catalog shows ratings from five.
+- **The team** edits author profiles (`/v1/content/authors/me`), sees their Collections (`/authors/me/collections`), features up to five items per app (`/catalogs/{app}/featured`, publishers) and reviews reports (`/reports`, `/reports/{id}/dismiss`, publishers). Reports never show who sent them.
+
+Account deletion removes the person's ratings (recounting each item) and reports.
+
 ### Food Data Providers
 
 Start with one provider selected for the actual workflow: nutrient reference data, packaged-food/barcode lookup, and recipe search are different requirements. Add another only for a demonstrated coverage gap.

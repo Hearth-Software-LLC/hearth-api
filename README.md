@@ -84,8 +84,9 @@ diffs, bundles), `service.ts` (storage and publishing) and `routes.ts`.
   content); owners do everything and admins publish everywhere. Invite codes carry the same two
   fields. Members with no Hearth Studio permission are content-only: `/v1/studio`, `/v1/library`
   and `/v1/social` answer `403 CONTENT_ONLY` for them.
-- **Routes** are under `/v1/content` (types, entries, drafts, reviews, comments, checks, diff,
-  media uploads, publish, rollback, unpublish, releases, catalogs). Publishing and rolling back
+- **Routes** are under `/v1/content` (types, entries, drafts, listings, reviews, comments, checks,
+  diff, media uploads, publish, rollback, unpublish, releases, catalogs, covers, authors, featured,
+  reports). Publishing and rolling back
   need a sign-in from the last 12 hours (Supabase's `amr` claim): `401 REAUTHENTICATE` otherwise.
 - **Publishing** writes an immutable bundle to the public `hearth-content` bucket at
   `apps/<app>/<type>/<slug>.v<version>.<hash>.json` (`shared/…` for shared content), then moves the
@@ -93,6 +94,13 @@ diffs, bundles), `service.ts` (storage and publishing) and `routes.ts`.
 - **Apps read** `GET /v1/content/<app>/catalog` without a token: their own items plus every shared
   one, `Cache-Control: public, max-age=60` and an ETag. Scheduled publishes go out when a catalog
   is read or `/internal/content/cron` runs.
+- **Collections** (`20261031090000_content_collections.sql`): downloadable types (learning modules)
+  have a listing and cover per version, author profiles, ratings, reports and a featured list per
+  app. Plus bundles go to the private `hearth-content-plus` bucket (the migration creates it, like
+  `hearth-content`; create it by hand as a private bucket if the migration ran without the storage
+  schema). `GET /v1/content/<app>/catalog?format=2` is the Collections catalog; without `format`
+  it's unchanged for older builds and leaves Plus items out. Rating, reporting and downloading use
+  the normal Hearth token. See API-ARCHITECTURE.md.
 - **Tests**: `tests/content/` (set `SOCIAL_TEST_DATABASE_URL` for the Postgres ones).
 
 ## Account deletion
