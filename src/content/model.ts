@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
+import {
+  assessmentBlockSchema, blockId, linkBlockSchema, matchExtras, questionExtras, scriptureExtras, stepBlockSchema, unresolvedReferences,
+} from './hearken-blocks.js';
 
 /**
  * Hearth Content's model: content types, the block library, a draft's body, the checks a version
@@ -10,7 +13,7 @@ import { z } from 'zod';
 export const FIELD_TYPES = ['text', 'longtext', 'number', 'boolean', 'image'] as const;
 export type FieldType = typeof FIELD_TYPES[number];
 
-export const BLOCK_KINDS = ['text', 'scripture', 'callout', 'quiz', 'match', 'timeline', 'image', 'video'] as const;
+export const BLOCK_KINDS = ['text', 'scripture', 'callout', 'quiz', 'match', 'timeline', 'image', 'video', 'link', 'step', 'assessment'] as const;
 export type BlockKind = typeof BLOCK_KINDS[number];
 
 /** The block library. `app`: only that app's types may use the block. */
@@ -23,6 +26,9 @@ export const BLOCK_LIBRARY: Record<BlockKind, { label: string; description: stri
   timeline: { label: 'Timeline', description: 'Dated events in order.', app: 'hearken' },
   image: { label: 'Image', description: 'An uploaded image with alt text.' },
   video: { label: 'Video', description: 'A video link.' },
+  link: { label: 'Link', description: 'A resource: a book, article or website, or a chapter Hearken opens.' },
+  step: { label: 'Step', description: 'A Scholar Path learning item; the blocks after it are its content.', app: 'hearken' },
+  assessment: { label: 'Assessment', description: 'A quiz drawn from a question pool, a rubric-scored essay, a checkpoint or exam.', app: 'hearken' },
 };
 
 const key = z.string().regex(/^[a-z][A-Za-z0-9]{0,39}$/);
@@ -139,23 +145,27 @@ export function coverMediaIds(listing: Listing | null | undefined): string[] {
 
 // MARK: Body
 
-const id = z.string().regex(/^[A-Za-z0-9_-]{1,40}$/);
+/** Letters, digits, `_`, `-` and `.`, up to 80 (Hearken's ids, like "bofm.u1", are used as they are). */
+const id = blockId;
 const text = (max: number) => z.string().max(max).default('');
 
 export const blockSchema = z.discriminatedUnion('type', [
   z.object({ id, type: z.literal('text'), text: text(20_000) }).strict(),
-  z.object({ id, type: z.literal('scripture'), ref: text(120), text: text(4000), highlight: z.boolean().default(false) }).strict(),
+  z.object({ id, type: z.literal('scripture'), ref: text(120), text: text(4000), highlight: z.boolean().default(false), ...scriptureExtras }).strict(),
   z.object({ id, type: z.literal('callout'), label: text(60), text: text(4000) }).strict(),
   z.object({
     id, type: z.literal('quiz'), question: text(1000),
     options: z.array(z.object({ id, text: text(500), correct: z.boolean().default(false) }).strict()).max(8).default([]),
     explanation: text(2000), hint: text(500), weight: z.number().int().min(0).max(10).default(1),
-    shuffle: z.boolean().default(true), mastery: z.boolean().default(true),
+    shuffle: z.boolean().default(true), mastery: z.boolean().default(true), ...questionExtras,
   }).strict(),
-  z.object({ id, type: z.literal('match'), prompt: text(500), pairs: z.array(z.object({ id, left: text(200), right: text(200) }).strict()).max(12).default([]) }).strict(),
+  z.object({ id, type: z.literal('match'), prompt: text(500), pairs: z.array(z.object({ id, left: text(200), right: text(200), rightId: id.optional() }).strict()).max(12).default([]), ...matchExtras }).strict(),
   z.object({ id, type: z.literal('timeline'), events: z.array(z.object({ id, date: text(40), label: text(300) }).strict()).max(40).default([]) }).strict(),
   z.object({ id, type: z.literal('image'), mediaId: z.uuid().nullable().default(null), alt: text(500), caption: text(500) }).strict(),
   z.object({ id, type: z.literal('video'), url: text(500), title: text(120), caption: text(500) }).strict(),
+  linkBlockSchema,
+  stepBlockSchema,
+  assessmentBlockSchema,
 ]);
 export type Block = z.infer<typeof blockSchema>;
 
@@ -196,8 +206,8 @@ export function mediaIds(body: Body): string[] {
 export type Check = { id: string; label: string; state: 'pass' | 'warn' | 'fail'; detail?: string };
 export type MediaInfo = { id: string; uploaded: boolean; alt: string; width?: number | null; height?: number | null };
 
-/** "D&C 130:22", "1 Nephi 3:7", "Moses 1:39", "John 3:16-17, 19". */
-const SCRIPTURE_REF = /^(?:[1-4]\s)?[A-Za-z][A-Za-z&.' ]{0,40}\s\d{1,3}(?::\d{1,3}(?:[-–]\d{1,3})?(?:,\s?\d{1,3}(?:[-–]\d{1,3})?)*)?$/;
+/** "D&C 130:22", "1 Nephi 3:7", "Moses 1:39", "John 3:16-17, 19", "Joseph Smith—History 1:17". */
+const SCRIPTURE_REF = /^(?:[1-4]\s)?[A-Za-z][A-Za-z&.' —]{0,40}\s\d{1,3}(?::\d{1,3}(?:[-–]\d{1,3})?(?:,\s?\d{1,3}(?:[-–]\d{1,3})?)*)?$/;
 export const isScriptureRef = (ref: string) => SCRIPTURE_REF.test(ref.trim());
 
 const where = (section: Section | null, index: number, labelOf: string) =>
@@ -258,8 +268,10 @@ export function runChecks(options: {
 
   const quizzes = blocks.filter(({ block }) => block.type === 'quiz');
   if (quizzes.length) {
-    const bad = quizzes.filter(({ block }) => block.type === 'quiz'
-      && (!block.question.trim() || block.options.filter((option) => option.text.trim()).length < 2 || block.options.filter((option) => option.correct).length !== 1));
+    // A short-answer question has no options: it needs an answer guide instead.
+    const bad = quizzes.filter(({ block }) => block.type === 'quiz' && (!block.question.trim() || (block.style === 'short'
+      ? !block.guide?.trim()
+      : block.options.filter((option) => option.text.trim()).length < 2 || block.options.filter((option) => option.correct).length !== 1)));
     checks.push(bad.length
       ? { id: 'quiz', label: 'Every quiz has exactly one correct answer', state: 'fail', detail: `${bad.length} quiz${bad.length === 1 ? '' : 'zes'} need a question, two answers and one marked correct` }
       : { id: 'quiz', label: 'Every quiz has exactly one correct answer', state: 'pass' });
@@ -281,6 +293,13 @@ export function runChecks(options: {
 
   const videos = blocks.filter(({ block }) => block.type === 'video' && !/^https:\/\/\S+$/.test(block.url.trim()));
   if (videos.length) checks.push({ id: 'video', label: 'Videos have https links', state: 'fail', detail: `${videos.length} video block${videos.length === 1 ? '' : 's'} need an https link` });
+
+  if (blocks.some(({ block }) => block.type === 'step' || block.type === 'assessment')) {
+    const missing = unresolvedReferences(blocks.map(({ block }) => block));
+    checks.push(missing.length
+      ? { id: 'references', label: 'Steps and assessments point at questions that exist', state: 'fail', detail: `Missing: ${missing.slice(0, 10).join(', ')}${missing.length > 10 ? ` and ${missing.length - 10} more` : ''}` }
+      : { id: 'references', label: 'Steps and assessments point at questions that exist', state: 'pass' });
+  }
 
   if (options.definition.listing?.downloadable) checks.push(...listingChecks(options.listing ?? null, media));
 
