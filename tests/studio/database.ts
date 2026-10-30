@@ -12,9 +12,12 @@ export const STUDIO_MIGRATIONS = [
   '20261029200000_affiliates_and_links.sql',
   '20261029220000_studio_admin_role.sql',
   '20261029230000_monetization_plans.sql',
+  '20261030120000_hearth_content.sql',
 ];
 
 export const STUDIO_TABLES = [
+  'content_audit_log', 'content_catalogs', 'content_releases', 'content_media', 'content_comments', 'content_reviews',
+  'content_versions', 'content_entries', 'content_types', 'studio_invite_attempts',
   'monetization_plans',
   'asc_report_requests', 'campaign_stats_daily', 'link_taps_daily', 'campaign_links', 'affiliate_flags', 'affiliate_credits',
   'affiliate_payouts', 'affiliate_attributions', 'affiliate_invites', 'affiliate_codes', 'affiliates',
@@ -47,8 +50,12 @@ export async function migrate(sql: postgres.Sql): Promise<() => Promise<void>> {
   return release;
 }
 
-/** Empties everything but the team row the migration made. */
+/** The content types the content migration starts with. */
+const SEEDED_TYPES = ['learning-module', 'help-article', 'whats-new', 'onboarding'];
+
+/** Empties everything but the team row and the starting content types the migrations made. */
 export async function reset(sql: postgres.Sql) {
-  await sql.unsafe(`truncate ${STUDIO_TABLES.filter((table) => table !== 'studio_teams').join(', ')} cascade`);
+  await sql.unsafe(`truncate ${STUDIO_TABLES.filter((table) => table !== 'studio_teams' && table !== 'content_types').join(', ')} cascade`);
+  await sql`delete from content_types where slug <> all(${SEEDED_TYPES})`;
   await sql`update studio_teams set keep_runs = 2`;
 }

@@ -93,6 +93,9 @@ import { createGitHubApps } from './studio/github.js';
 import type { GitHubApps } from './studio/github.js';
 import { createStudioNotifier } from './studio/notify.js';
 import type { StudioNotifier } from './studio/notify.js';
+import { PUBLIC_CATALOG, registerContent } from './content/routes.js';
+import { createContentService } from './content/service.js';
+import type { ContentService, ContentStorage } from './content/service.js';
 
 export type AppOptions = {
   config?: Config;
@@ -136,6 +139,8 @@ export type AppOptions = {
     team?: TeamService; library?: LibraryService; storage?: StudioStorage; documents?: DocumentsService;
     plans?: PlansBackend; apps?: GitHubApps; notifier?: StudioNotifier; sql?: Sql; monetization?: MonetizationBackend; storeProducts?: StoreProducts; planDefinitions?: PlanStore;
   };
+  /** Hearth Content (/v1/content). Built from DATABASE_URL and Supabase storage when not given. */
+  content?: { service?: ContentService; storage?: ContentStorage };
   /** Affiliates and campaign links. Built from DATABASE_URL, SOCIAL_TOKEN_KEY and ASC_* when not given. */
   affiliates?: { service?: AffiliateService; links?: LinkService; importStats?: (team: string) => Promise<unknown> };
 };
@@ -232,6 +237,8 @@ export function createApp(options: AppOptions = {}) {
   const requireAuth = authMiddleware(verifyToken);
   app.use('/v1/*', async (context, next) => {
     if (context.req.path.startsWith('/v1/bigtable/')) return next();
+    // Each Hearth app reads its content catalog without signing in.
+    if (context.req.method === 'GET' && PUBLIC_CATALOG.test(context.req.path)) return next();
     return requireAuth(context, next);
   });
 
@@ -414,6 +421,22 @@ export function createApp(options: AppOptions = {}) {
     sql: () => options.studio?.sql ?? database,
   });
 
+  // Hearth Content: content for the apps, from content.hearthapps.com (and each app's public catalog).
+  const contentStorage = options.content?.storage ?? (config.SUPABASE_URL && config.SUPABASE_SECRET_KEY ? supabaseContentStorage(config.SUPABASE_URL) : undefined);
+  const contentService = options.content?.service ?? (database ? createContentService(database, { storage: contentStorage }) : undefined);
+  registerContent(app, {
+    team: () => studioTeam,
+    content: () => contentService,
+    apps: () => options.studio?.apps ?? githubAppsFromConfig(config, options.fetcher ?? fetch),
+    library: () => studioLibrary,
+  });
+  // Scheduled publishes also go out whenever an app reads its catalog; this catches quiet periods.
+  app.get('/internal/content/cron', async (context) => {
+    requireCronSecret(config, context.req.header('Authorization'));
+    if (!contentService) return context.json({ skipped: 'Hearth Content is not configured' }, 200);
+    return context.json({ published: await contentService.runDue() }, 200);
+  });
+
   // Affiliates: credit keyed on an HMAC of store transaction ids, with a key derived from SOCIAL_TOKEN_KEY.
   const affiliateService = options.affiliates?.service ?? (database && config.SOCIAL_TOKEN_KEY
     ? createAffiliateService(database, {
@@ -568,6 +591,23 @@ const supabaseLibraryStorage: StudioStorage = {
     if (error) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'The Library could not store the file');
   },
 };
+
+/** Hearth Content's bundles and images in the public hearth-content bucket (supabase/migrations/20261030120000_hearth_content.sql). */
+function supabaseContentStorage(supabaseUrl: string): ContentStorage {
+  const base = `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/public/hearth-content/`;
+  return {
+    async put(path, bytes, contentType) {
+      const { error } = await supabaseAdmin.storage.from('hearth-content').upload(path, bytes, { contentType, upsert: true, cacheControl: '31536000' });
+      if (error) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Content storage could not save the file');
+    },
+    async uploadUrl(path) {
+      const { data, error } = await supabaseAdmin.storage.from('hearth-content').createSignedUploadUrl(path, { upsert: true });
+      if (error || !data) throw new ApiError(503, 'STORAGE_UNAVAILABLE', 'Image uploads are temporarily unavailable');
+      return { url: data.signedUrl, token: data.token };
+    },
+    publicUrl: (path) => base + path.split('/').map(encodeURIComponent).join('/'),
+  };
+}
 
 let sharedDocuments: DocumentsService | undefined;
 let sharedPlans: PlansBackend | undefined;

@@ -19,7 +19,7 @@ import type { StoreProducts } from './storeProducts.js';
 import { HEARTH_SCOPE, desiredProducts, setUpProduct } from './monetizationPlans.js';
 import type { PlanStore } from './monetizationPlans.js';
 import { can } from './team.js';
-import type { Member, TeamService } from './team.js';
+import type { ContentAccess, Member, TeamService } from './team.js';
 
 /**
  * Hearth Studio's API (Mac, iPhone, iPad): the team, plans, the Library, ad campaigns, Store
@@ -72,7 +72,15 @@ const memberView = (member: Member) => ({
   },
   notifications: { due: member.notifyDue, comments: member.notifyComments, failed: member.notifyFailed },
   addedAt: member.addedAt,
+  /** Hearth Content: the role set on them (owners and admins get theirs from their team role). */
+  content: { role: member.contentRole, apps: member.contentApps },
 });
+
+/** A content role and its apps (null apps: every app); role null takes content access away. */
+const contentAccess = z.object({
+  role: z.enum(['author', 'reviewer', 'publisher']).nullable(),
+  apps: z.array(appKey).min(1).max(40).nullable(),
+}).strict();
 
 export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: StudioDependencies) {
   const required = <T>(get: () => T | undefined, what: string): T => {
@@ -163,13 +171,13 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
     method: 'patch', path: '/v1/studio/members/{userId}', summary: 'A member’s role (admin or member) and what they can do (owners only)',
     request: {
       params: z.object({ userId: uuid.openapi({ param: { name: 'userId', in: 'path' } }) }),
-      ...body(z.object({ role: z.enum(['admin', 'member']).optional(), post: z.boolean().optional(), plans: z.boolean().optional(), accounts: z.boolean().optional(), affiliates: z.boolean().optional() }).strict()),
+      ...body(z.object({ role: z.enum(['admin', 'member']).optional(), post: z.boolean().optional(), plans: z.boolean().optional(), accounts: z.boolean().optional(), affiliates: z.boolean().optional(), content: contentAccess.optional() }).strict()),
     },
     responses: { 200: anyJson('Member'), ...errors },
   }), async (context) => {
     const owner = need(context, 'owner');
     const input = context.req.valid('json');
-    const updated = await team().updateMember(owner.teamId, context.req.valid('param').userId, defined({ role: input.role, canPost: input.post, canPlans: input.plans, canAccounts: input.accounts, canAffiliates: input.affiliates }));
+    const updated = await team().updateMember(owner.teamId, context.req.valid('param').userId, defined({ role: input.role, canPost: input.post, canPlans: input.plans, canAccounts: input.accounts, canAffiliates: input.affiliates, content: input.content as ContentAccess | undefined }));
     return context.json(await view(updated), 200);
   });
 
@@ -185,12 +193,12 @@ export function registerStudio(app: OpenAPIHono<ApiEnvironment>, dependencies: S
 
   app.openapi(route('Studio team', {
     method: 'post', path: '/v1/studio/invites', summary: 'An invite code for someone to join the team (owners only; a week, one use)',
-    request: body(z.object({ post: z.boolean().default(true), plans: z.boolean().default(false), accounts: z.boolean().default(false), affiliates: z.boolean().default(false) }).strict()),
+    request: body(z.object({ post: z.boolean().default(true), plans: z.boolean().default(false), accounts: z.boolean().default(false), affiliates: z.boolean().default(false), content: contentAccess.optional() }).strict()),
     responses: { 200: anyJson('Invite'), ...errors },
   }), async (context) => {
     const owner = need(context, 'owner');
     const input = context.req.valid('json');
-    return context.json(await team().createInvite(owner.teamId, owner.userId, { canPost: input.post, canPlans: input.plans, canAccounts: input.accounts, canAffiliates: input.affiliates }), 200);
+    return context.json(await team().createInvite(owner.teamId, owner.userId, { canPost: input.post, canPlans: input.plans, canAccounts: input.accounts, canAffiliates: input.affiliates, ...(input.content ? { content: input.content as ContentAccess } : {}) }), 200);
   });
 
   app.openapi(route('Studio team', {

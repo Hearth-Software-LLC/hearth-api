@@ -73,6 +73,28 @@ HEARKEN_TEST_DATABASE_URL=postgres://localhost/hearken_test npm test
 | `GITHUB_ORG` | Default `Hearth-Software-LLC` |
 | `STUDIO_APNS_TOPIC` | Hearth Studio's push topic (default `com.stephenwarren.hearthstudio`); pushes use the `APNS_*` key |
 
+## Hearth Content
+
+Content for the Hearth apps, written at content.hearthapps.com (the `hearth-content` repo) and
+read by each app. `src/content/` holds it: `model.ts` (content types, the block library, checks,
+diffs, bundles), `service.ts` (storage and publishing) and `routes.ts`.
+
+- **Who can do what** lives on the Hearth Studio team. Each member has a content role (`author`,
+  `reviewer`, `publisher`) and the apps it covers (`content_apps`, null for every app and shared
+  content); owners do everything and admins publish everywhere. Invite codes carry the same two
+  fields. Members with no Hearth Studio permission are content-only: `/v1/studio`, `/v1/library`
+  and `/v1/social` answer `403 CONTENT_ONLY` for them.
+- **Routes** are under `/v1/content` (types, entries, drafts, reviews, comments, checks, diff,
+  media uploads, publish, rollback, unpublish, releases, catalogs). Publishing and rolling back
+  need a sign-in from the last 12 hours (Supabase's `amr` claim): `401 REAUTHENTICATE` otherwise.
+- **Publishing** writes an immutable bundle to the public `hearth-content` bucket at
+  `apps/<app>/<type>/<slug>.v<version>.<hash>.json` (`shared/…` for shared content), then moves the
+  item's entry in its app's catalog. Rolling back points the catalog at an earlier bundle.
+- **Apps read** `GET /v1/content/<app>/catalog` without a token: their own items plus every shared
+  one, `Cache-Control: public, max-age=60` and an ETag. Scheduled publishes go out when a catalog
+  is read or `/internal/content/cron` runs.
+- **Tests**: `tests/content/` (set `SOCIAL_TEST_DATABASE_URL` for the Postgres ones).
+
 ## Account deletion
 
 `DELETE /v1/me` deletes the caller's Hearth account for every app; `src/services/account-deletion.ts` holds the one implementation, which `DELETE /v1/bigtable/me` also uses. In order:

@@ -1,7 +1,7 @@
 import type { Context, MiddlewareHandler } from 'hono';
 import type { ApiEnvironment } from '../contracts/common.js';
 import { ApiError } from '../errors.js';
-import { can } from './team.js';
+import { can, hasStudioAccess } from './team.js';
 import type { Member, Permission, TeamService } from './team.js';
 
 /**
@@ -16,6 +16,10 @@ export function studioMiddleware(team: () => TeamService | undefined): Middlewar
     const member = await service.memberOf(context.get('userId'));
     if (!member) {
       throw new ApiError(403, 'NOT_ON_TEAM', 'This account isn’t on the Hearth Software team. Ask Steve for an invite.');
+    }
+    // Content-only members (no Hearth Studio permission at all) don't see Hearth Studio.
+    if (!hasStudioAccess(member)) {
+      throw new ApiError(403, 'CONTENT_ONLY', 'This account has Hearth Content access only. Open content.hearthapps.com to write.');
     }
     context.set('studioMember', member);
     await next();

@@ -159,7 +159,7 @@ describe.skipIf(!url)('Hearth Studio (Postgres)', () => {
   });
 
   it('checks permissions on social routes too', async () => {
-    await call('kristen', 'POST', `/v1/studio/invites/${await invite({ post: false })}/join`, {});
+    await call('kristen', 'POST', `/v1/studio/invites/${await invite({ post: false, plans: true })}/join`, {});
     const denied = await call('kristen', 'POST', '/v1/social/connections/meta/start', { app: 'hearth' });
     expect(denied.body.error.code).toBe('PERMISSION_REQUIRED');
     // Reading is fine for any member.

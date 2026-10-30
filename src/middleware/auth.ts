@@ -5,7 +5,16 @@ import type { Config } from '../config.js';
 import type { ApiEnvironment } from '../contracts/common.js';
 import { ApiError } from '../errors.js';
 
-export type VerifiedIdentity = { userId: string; isAnonymous: boolean };
+/** `signedInAt`: when the person last actually signed in (seconds), from Supabase's `amr` claim. */
+export type VerifiedIdentity = { userId: string; isAnonymous: boolean; signedInAt?: number };
+
+/** The newest sign-in time in a Supabase token's `amr` claim (refreshes don't change it). */
+export function signedInAtOf(payload: Record<string, unknown>): number | undefined {
+  const amr = payload.amr;
+  if (!Array.isArray(amr)) return undefined;
+  const times = amr.map((entry) => (entry && typeof entry === 'object' ? Number((entry as { timestamp?: unknown }).timestamp) : NaN)).filter(Number.isFinite);
+  return times.length ? Math.max(...times) : undefined;
+}
 export type VerifyToken = (token: string) => Promise<string | VerifiedIdentity>;
 
 export function createTokenVerifier(config: Config, resolver?: JWTVerifyGetKey): VerifyToken {
@@ -29,7 +38,8 @@ export function createTokenVerifier(config: Config, resolver?: JWTVerifyGetKey):
       if (typeof payload.sub !== 'string' || !payload.sub.trim()) {
         throw new ApiError(401, 'UNAUTHORIZED', 'A valid bearer token is required');
       }
-      return { userId: payload.sub, isAnonymous: payload.is_anonymous === true };
+      const signedInAt = signedInAtOf(payload as Record<string, unknown>);
+      return { userId: payload.sub, isAnonymous: payload.is_anonymous === true, ...(signedInAt === undefined ? {} : { signedInAt }) };
     } catch (error) {
       if (error instanceof ApiError) throw error;
       if (error instanceof errors.JOSEError && !(error instanceof errors.JWKSTimeout)) {
@@ -51,6 +61,7 @@ export function authMiddleware(verifyToken: VerifyToken) {
     const identity = await verifyToken(token);
     context.set('userId', typeof identity === 'string' ? identity : identity.userId);
     context.set('isAnonymous', typeof identity === 'string' ? false : identity.isAnonymous);
+    context.set('signedInAt', typeof identity === 'string' ? undefined : identity.signedInAt);
     await next();
   });
 }

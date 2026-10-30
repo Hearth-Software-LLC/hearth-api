@@ -14,6 +14,8 @@ export type ApiEnvironment = {
     requestId: string;
     userId: string;
     isAnonymous: boolean;
+    /** When the caller last signed in (seconds since 1970), when the token says. */
+    signedInAt: number | undefined;
     /** The error code a failed request answered with, for the request log. */
     errorCode: string | undefined;
     /** The caller's Hearth Studio membership, on /v1/social, /v1/studio and /v1/library (studio/gate.ts). */
