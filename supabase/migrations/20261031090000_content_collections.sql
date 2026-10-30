@@ -10,9 +10,18 @@
 -- (1 to 5 stars, one rating per person per item) and report items; publishers review the reports.
 -- Each app's catalog gains a featured list (up to five items) with its own version.
 --
+-- Each catalog keeps two lists: `entries` stays exactly what format 1 (and any older hearth-api
+-- build) serves, free items only; `entries_v2` holds every item with its Collection fields.
+-- Ratings and featured changes bump their own versions, never `version`, which old builds read.
+--
+-- Safe to apply before deploying the hearth-api that uses it: it only adds. Making learning modules
+-- Collections is a separate migration (20261031100000_learning_module_listing_after_deploy.sql),
+-- applied after that deploy, because the API before it rejects the new type definition.
+--
 -- Like the other content tables: row-level security on, no policies, no grants to app roles.
 
 begin;
+set local lock_timeout = '5s';
 
 alter table public.content_versions add column if not exists listing jsonb;
 
@@ -22,12 +31,18 @@ alter table public.content_entries
 
 alter table public.content_catalogs
   add column if not exists featured jsonb not null default '[]'::jsonb,
-  add column if not exists featured_version integer not null default 0;
+  add column if not exists featured_version integer not null default 0,
+  add column if not exists ratings_version integer not null default 0,
+  add column if not exists entries_v2 jsonb not null default '[]'::jsonb;
+-- What's published so far, as format 2 reads it (the API fills in the Collection defaults).
+update public.content_catalogs set entries_v2 = entries where entries_v2 = '[]'::jsonb and entries <> '[]'::jsonb;
 
 -- Rolling back rebuilds the catalog entry from the release: the full hash and the download size.
 alter table public.content_releases
   add column if not exists sha256 text check (sha256 ~ '^[0-9a-f]{64}$'),
-  add column if not exists download_bytes bigint;
+  add column if not exists download_bytes bigint,
+  -- In the private Plus bucket, so it has no public URL.
+  add column if not exists plus boolean not null default false;
 
 create table public.content_authors (
   id uuid primary key default gen_random_uuid(),
@@ -62,12 +77,9 @@ create table public.content_collection_reports (
   closed_by uuid
 );
 create index content_collection_reports_open on public.content_collection_reports (entry_id, created_at) where state = 'open';
+-- One open report per person per item.
+create unique index content_collection_reports_one_open on public.content_collection_reports (entry_id, user_id) where state = 'open';
 create index content_collection_reports_user on public.content_collection_reports (user_id, created_at desc);
-
--- Learning modules are Collections: counted in lessons.
-update public.content_types
-set definition = definition || '{"listing":{"downloadable":true,"unit":{"one":"lesson","many":"lessons"},"countFrom":"sections"}}'::jsonb
-where slug = 'learning-module' and not (definition ? 'listing');
 
 do $$
 declare

@@ -14,6 +14,7 @@ export const STUDIO_MIGRATIONS = [
   '20261029230000_monetization_plans.sql',
   '20261030120000_hearth_content.sql',
   '20261031090000_content_collections.sql',
+  '20261031100000_learning_module_listing_after_deploy.sql',
 ];
 
 export const STUDIO_TABLES = [

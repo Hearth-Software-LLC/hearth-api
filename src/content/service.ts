@@ -93,6 +93,9 @@ const summary = (row: Record<string, unknown>): EntrySummary => ({
   state: row.state as VersionState, scheduledFor: isoOrNull(row.scheduled_for), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
 });
 
+/** A save lost a race with another one. */
+class Stale extends Error {}
+
 /** A catalog entry as stored: format 1's fields, plus the Collection's for items published since. */
 type StoredEntry = CatalogEntry & Partial<CatalogEntryV2>;
 
@@ -208,12 +211,12 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
       const [release] = scheduled
         ? await tx`
             update content_releases set state = 'done', bundle_path = ${bundle.path}, hash = ${bundle.hash}, bytes = ${bundle.bytes.length},
-              sha256 = ${bundle.sha256}, download_bytes = ${catalogEntry.downloadBytes}, catalog_version = ${catalogVersion}, created_at = now()
+              sha256 = ${bundle.sha256}, download_bytes = ${catalogEntry.downloadBytes}, plus = ${plus}, catalog_version = ${catalogVersion}, created_at = now()
             where id = ${scheduled} returning id`
         : await tx`
-            insert into content_releases (team_id, app_key, entry_id, version, action, bundle_path, hash, bytes, sha256, download_bytes, catalog_version, override, published_by)
+            insert into content_releases (team_id, app_key, entry_id, version, action, bundle_path, hash, bytes, sha256, download_bytes, plus, catalog_version, override, published_by)
             values (${teamId}, ${entry.app_key}, ${entryId}, ${version}, 'publish', ${bundle.path}, ${bundle.hash}, ${bundle.bytes.length}, ${bundle.sha256},
-              ${catalogEntry.downloadBytes}, ${catalogVersion}, ${override}, ${actor})
+              ${catalogEntry.downloadBytes}, ${plus}, ${catalogVersion}, ${override}, ${actor})
             returning id`;
       await tx`update content_entries set live_version = ${version}, live_release_id = ${release!.id}, updated_at = now() where id = ${entryId}`;
       await audit(tx as unknown as Sql, teamId, actor, override ? 'publish_override' : 'publish', entryId, { version, bundle: bundle.path, catalogVersion });
@@ -221,16 +224,56 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
     });
   }
 
-  /** Puts (or with null, takes out) an item's entry in an app's catalog; returns the new catalog version. */
+  /**
+   * Locks the version being saved and checks nobody saved it (or published it) since the caller
+   * read it. Saves lock the version row before the entry row, the same order publishing uses.
+   */
+  async function lockRevision(tx: Sql, entryId: string, latest: VersionView, revision: number) {
+    const [row] = await tx`select state, revision from content_versions where entry_id = ${entryId} and version = ${latest.version} for update`;
+    if (!row || Number(row.revision) !== revision || row.state !== latest.state) throw new Stale();
+  }
+
+  /** Runs a save; a lost race (a newer revision, or another save that started the next version) is a 409 with the current item. */
+  async function saving<T, C>(save: () => Promise<T>, current: () => Promise<C>): Promise<T> {
+    try {
+      return await save();
+    } catch (error) {
+      if (error instanceof Stale || isUniqueViolation(error)) throw new VersionConflict(await current());
+      throw error;
+    }
+  }
+
+  /**
+   * Puts (or with null, takes out) an item's entry in an app's catalog; returns the new catalog
+   * version. `entries` keeps format 1's rows (free items only, so an older API build serves exactly
+   * what it always did); `entries_v2` keeps every item. The rating is read here, under the
+   * catalog's lock, so a rating that lands while publishing isn't lost.
+   */
   async function placeInCatalog(tx: Sql, teamId: string, app: string, entry: CatalogEntryV2 | null, removeId?: string) {
     await tx`insert into content_catalogs (team_id, app_key) values (${teamId}, ${app}) on conflict do nothing`;
-    const [catalog] = await tx`select version, entries from content_catalogs where team_id = ${teamId} and app_key = ${app} for update`;
+    const [catalog] = await tx`select version, entries, entries_v2 from content_catalogs where team_id = ${teamId} and app_key = ${app} for update`;
     const id = entry?.id ?? removeId;
-    const entries = ((catalog!.entries as StoredEntry[]) ?? []).filter((existing) => existing.id !== id);
-    if (entry) entries.push(entry);
-    entries.sort((a, b) => a.type.localeCompare(b.type) || a.slug.localeCompare(b.slug));
+    let placed = entry;
+    if (entry?.downloadable) {
+      const [counted] = await tx`select rating_average, rating_count from content_entries where id = ${entry.id}`;
+      const { rating: _old, ...rest } = entry;
+      const rating = catalogRating(counted?.rating_average == null ? null : Number(counted.rating_average), Number(counted?.rating_count ?? 0));
+      placed = { ...rest, ...(rating ? { rating } : {}) };
+    }
+    const order = (a: CatalogEntry, b: CatalogEntry) => a.type.localeCompare(b.type) || a.slug.localeCompare(b.slug);
+    const v1 = ((catalog!.entries as CatalogEntry[]) ?? []).filter((existing) => existing.id !== id);
+    const v2 = ((catalog!.entries_v2 as StoredEntry[]) ?? []).filter((existing) => existing.id !== id);
+    if (placed) {
+      v2.push(placed);
+      const plain = asCatalogV1(placed);
+      if (plain) v1.push(plain);
+    }
+    v1.sort(order);
+    v2.sort(order);
     const version = Number(catalog!.version) + 1;
-    await tx`update content_catalogs set version = ${version}, entries = ${tx.json(entries as never)}, updated_at = now() where team_id = ${teamId} and app_key = ${app}`;
+    await tx`
+      update content_catalogs set version = ${version}, entries = ${tx.json(v1 as never)}, entries_v2 = ${tx.json(v2 as never)}, updated_at = now()
+      where team_id = ${teamId} and app_key = ${app}`;
     return version;
   }
 
@@ -284,26 +327,36 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
     };
   }
 
-  /** Recounts an item's ratings and refreshes its rating in its app's catalog (a new catalog version). */
+  /** Format-2 catalog authors: authorView without the media id. */
+  function catalogAuthor(row: Record<string, unknown>, photoPath: string | null) {
+    return authorView(row, photoPath);
+  }
+
+  /**
+   * Recounts an item's ratings and refreshes its rating in its app's catalog (format 2 only; bumps
+   * the ratings version, not the catalog version old builds read). Locks the catalog first, like
+   * publishing does, and counts after the lock, so concurrent ratings each see the others.
+   */
   async function recountRatings(tx: Sql, entryId: string) {
+    const [item] = await tx`select team_id, app_key from content_entries where id = ${entryId}`;
+    if (!item) return { average: null as number | null, count: 0 };
+    const [catalog] = await tx`select entries_v2 from content_catalogs where team_id = ${item.team_id} and app_key = ${item.app_key} for update`;
     const [counted] = await tx`
       update content_entries e set rating_count = r.count, rating_average = r.average
       from (select count(*)::int as count, avg(stars)::numeric(3, 2) as average from content_ratings where entry_id = ${entryId}) r
       where e.id = ${entryId}
-      returning e.team_id, e.app_key, e.rating_count, e.rating_average`;
-    if (!counted) return { average: null as number | null, count: 0 };
-    const average = counted.rating_average == null ? null : Number(counted.rating_average);
-    const count = Number(counted.rating_count);
-    const [catalog] = await tx`select version, entries from content_catalogs where team_id = ${counted.team_id} and app_key = ${counted.app_key} for update`;
-    const entries = (catalog?.entries as StoredEntry[] | undefined) ?? [];
+      returning e.rating_count, e.rating_average`;
+    const average = counted?.rating_average == null ? null : Number(counted.rating_average);
+    const count = Number(counted?.rating_count ?? 0);
+    const entries = (catalog?.entries_v2 as StoredEntry[] | undefined) ?? [];
     const index = entries.findIndex((entry) => entry.id === entryId);
     if (catalog && index >= 0) {
       const { rating: _old, ...rest } = entries[index]!;
       const rating = rest.downloadable ? catalogRating(average, count) : undefined;
       entries[index] = { ...rest, ...(rating ? { rating } : {}) };
       await tx`
-        update content_catalogs set version = version + 1, entries = ${tx.json(entries as never)}, updated_at = now()
-        where team_id = ${counted.team_id} and app_key = ${counted.app_key}`;
+        update content_catalogs set ratings_version = ratings_version + 1, entries_v2 = ${tx.json(entries as never)}, updated_at = now()
+        where team_id = ${item.team_id} and app_key = ${item.app_key}`;
     }
     return { average, count };
   }
@@ -316,8 +369,8 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
       left join content_releases r on r.id = e.live_release_id
       where e.team_id = ${teamId} and e.id = ${id} and e.deleted_at is null and e.live_version is not null and e.app_key in (${app}, 'shared')`;
     if (!row) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'That item isn’t in this app');
-    const [catalog] = await sql`select entries from content_catalogs where team_id = ${teamId} and app_key = ${row.app_key}`;
-    const entry = ((catalog?.entries as StoredEntry[] | undefined) ?? []).find((candidate) => candidate.id === id);
+    const [catalog] = await sql`select entries_v2 from content_catalogs where team_id = ${teamId} and app_key = ${row.app_key}`;
+    const entry = ((catalog?.entries_v2 as StoredEntry[] | undefined) ?? []).find((candidate) => candidate.id === id);
     if (!entry) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'That item isn’t in this app');
     return { teamId, entry: asCatalogV2(entry), bundlePath: (row.bundle_path as string | null) ?? null };
   }
@@ -347,9 +400,11 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
     const rows = await sql`select * from content_catalogs where team_id = ${teamId} and app_key in (${app}, 'shared')`;
     const own = rows.find((row) => row.app_key === app);
     const shared = app === 'shared' ? undefined : rows.find((row) => row.app_key === 'shared');
-    const entries = [...((own?.entries as StoredEntry[] | undefined) ?? []), ...((shared?.entries as StoredEntry[] | undefined) ?? [])];
+    const list = (row: Record<string, unknown> | undefined, column: 'entries' | 'entries_v2') => (row?.[column] as StoredEntry[] | undefined) ?? [];
+    const entries = [...list(own, 'entries'), ...list(shared, 'entries')];
+    const entriesV2 = [...list(own, 'entries_v2'), ...list(shared, 'entries_v2')];
     const updated = [own?.updated_at, shared?.updated_at].filter(Boolean).map((value) => new Date(value as Date).getTime());
-    return { own, shared, entries, updatedAt: updated.length ? new Date(Math.max(...updated)).toISOString() : null };
+    return { own, shared, entries, entriesV2, updatedAt: updated.length ? new Date(Math.max(...updated)).toISOString() : null };
   }
 
   async function hearthTeamId(): Promise<string> {
@@ -455,7 +510,8 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
       const disallowed = [...new Set([...(input.body.sections ?? []).flatMap((section) => section.blocks), ...(input.body.blocks ?? [])]
         .map((block) => block.type).filter((kind) => !type.definition.blocks.includes(kind)))];
       if (disallowed.length) throw new ApiError(422, 'BLOCK_NOT_ALLOWED', `${type.name} doesn’t use ${disallowed.map((kind) => BLOCK_LIBRARY[kind].label).join(', ')} blocks`);
-      await sql.begin(async (tx) => {
+      await saving(() => sql.begin(async (tx) => {
+        await lockRevision(tx as unknown as Sql, id, latest, input.revision);
         if (latest.state === 'published') {
           const next = latest.version + 1;
           await tx`
@@ -467,13 +523,14 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
             await tx`delete from content_reviews where entry_id = ${id} and version = ${latest.version}`;
             await tx`update content_releases set state = 'canceled' where entry_id = ${id} and version = ${latest.version} and state = 'scheduled'`;
           }
-          await tx`
+          const [saved] = await tx`
             update content_versions set body = ${tx.json(input.body as never)}, schema_version = ${type.schemaVersion}, state = 'draft',
               revision = revision + 1, updated_by = ${actor}, updated_at = now(), submitted_at = null
-            where entry_id = ${id} and version = ${latest.version}`;
+            where entry_id = ${id} and version = ${latest.version} and revision = ${input.revision} returning revision`;
+          if (!saved) throw new Stale();
         }
         await tx`update content_entries set title = ${input.title ?? String(row.title)}, updated_at = now() where id = ${id}`;
-      });
+      }), () => this.entry(teamId, id));
       return this.entry(teamId, id);
     },
 
@@ -664,19 +721,20 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
       if (!target) throw new ApiError(404, 'RESOURCE_NOT_FOUND', 'That release can’t be rolled back to');
       const type = await typeRow(sql, teamId, String(row.type_id));
       const ver = await versionRow(sql, id, Number(target.version));
-      const bytes = Number(target.bytes);
-      // Releases from before Collections have no full hash or download size.
-      const sha256 = (target.sha256 as string | null) ?? '';
+      // The media the bundle uses, counted the same way publishing does. Releases from before
+      // Collections have no full hash: the apps verify those with the 6-character one.
+      const media = await mediaMap(sql, teamId, mediaIds(ver.body));
+      const mediaBytes = [...media.values()].reduce((sum, file) => sum + Number(file.bytes ?? 0), 0);
       const entry = await catalogEntryFor(sql, teamId, row, type, ver, {
-        hash: String(target.hash), sha256, bytes, mediaBytes: target.download_bytes == null ? 0 : Number(target.download_bytes) - bytes,
+        hash: String(target.hash), sha256: (target.sha256 as string | null) ?? '', bytes: Number(target.bytes), mediaBytes,
         url: storage().publicUrl(String(target.bundle_path)), publishedAt: iso(target.created_at),
       });
       return sql.begin(async (tx) => {
         const catalogVersion = await placeInCatalog(tx as unknown as Sql, teamId, String(row.app_key), entry);
         const [release] = await tx`
-          insert into content_releases (team_id, app_key, entry_id, version, action, bundle_path, hash, bytes, sha256, download_bytes, catalog_version, published_by)
+          insert into content_releases (team_id, app_key, entry_id, version, action, bundle_path, hash, bytes, sha256, download_bytes, plus, catalog_version, published_by)
           values (${teamId}, ${row.app_key}, ${id}, ${target.version}, 'rollback', ${target.bundle_path}, ${target.hash}, ${target.bytes},
-            ${target.sha256 ?? null}, ${target.download_bytes ?? null}, ${catalogVersion}, ${actor})
+            ${target.sha256 ?? null}, ${entry.downloadBytes}, ${target.plus === true}, ${catalogVersion}, ${actor})
           returning id`;
         await tx`update content_entries set live_version = ${target.version}, live_release_id = ${release!.id}, updated_at = now() where id = ${id}`;
         await audit(tx as unknown as Sql, teamId, actor, 'rollback', id, { toVersion: Number(target.version), releaseId });
@@ -710,7 +768,8 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
       return rows.map((row) => ({
         id: String(row.id), app: String(row.app_key), entryId: String(row.entry_id), title: String(row.title), version: Number(row.version),
         action: String(row.action), state: String(row.state), hash: (row.hash as string | null) ?? null, bytes: row.bytes == null ? null : Number(row.bytes),
-        bundleUrl: row.bundle_path ? storage().publicUrl(String(row.bundle_path)) : null, catalogVersion: row.catalog_version == null ? null : Number(row.catalog_version),
+        // Plus bundles are in the private bucket: no public URL.
+        bundleUrl: row.bundle_path && row.plus !== true ? storage().publicUrl(String(row.bundle_path)) : null, catalogVersion: row.catalog_version == null ? null : Number(row.catalog_version),
         override: row.override === true, live: String(row.live_release_id ?? '') === String(row.id),
         scheduledFor: isoOrNull(row.scheduled_for), by: String(row.published_by), byName: (row.actor_name as string | null) ?? null, at: iso(row.created_at),
       }));
@@ -720,7 +779,7 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
       const rows = await sql`select * from content_catalogs where team_id = ${teamId} order by app_key`;
       return rows.map((row) => ({
         app: String(row.app_key), version: Number(row.version), minAppVersion: String(row.min_app_version),
-        items: (row.entries as StoredEntry[]).length, updatedAt: iso(row.updated_at),
+        items: (row.entries_v2 as StoredEntry[]).length, updatedAt: iso(row.updated_at),
       }));
     },
 
@@ -746,19 +805,19 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
 
     /**
      * Format 2: every item (Plus ones with no URL), the featured list, and the authors of the
-     * Collections in it. `etag` covers the catalog, shared, featured and authors versions.
+     * Collections in it. `etag` covers the catalog, shared, featured, ratings and authors versions.
      */
     async catalogV2(app: string) {
-      const { own, shared, entries, updatedAt } = await catalogRows(app);
+      const { own, shared, entriesV2, updatedAt } = await catalogRows(app);
       const teamId = await hearthTeamId();
-      const items = entries.map(asCatalogV2);
+      const items = entriesV2.map(asCatalogV2);
       const ids = new Set(items.map((entry) => entry.id));
       const featured = ((own?.featured as FeaturedItem[] | undefined) ?? []).filter((item) => ids.has(item.id));
       const authorIds = [...new Set(items.filter((entry) => entry.downloadable && entry.authorId).map((entry) => entry.authorId!))];
       const authorRows = authorIds.length ? await sql`
         select a.*, m.path as photo_path from content_authors a left join content_media m on m.id = a.photo_media_id and m.uploaded
         where a.team_id = ${teamId} and a.id = any(${authorIds}::uuid[]) order by a.name, a.id` : [];
-      const authors = authorRows.map((row) => authorView(row, (row.photo_path as string | null) ?? null));
+      const authors = authorRows.map((row) => catalogAuthor(row, (row.photo_path as string | null) ?? null));
       const body = {
         app,
         version: Number(own?.version ?? 0),
@@ -772,7 +831,8 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
         entries: items,
       };
       const authorsVersion = createHash('sha256').update(stableJson(authors)).digest('hex').slice(0, 8);
-      const etag = `"2-${app}-${body.version}-${body.sharedVersion}-${body.minAppVersion}-${Number(own?.featured_version ?? 0)}-${authorsVersion}"`;
+      const ratings = `${Number(own?.ratings_version ?? 0)}.${Number(shared?.ratings_version ?? 0)}`;
+      const etag = `"2-${app}-${body.version}-${body.sharedVersion}-${body.minAppVersion}-${Number(own?.featured_version ?? 0)}-${ratings}-${authorsVersion}"`;
       return { body, etag };
     },
 
@@ -798,7 +858,8 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
         if (missing.length) throw new ApiError(422, 'MEDIA_NOT_FOUND', 'A cover image isn’t one of this app’s uploads');
       }
       const listing = sql.json(input.listing as never);
-      const revision = await sql.begin(async (tx) => {
+      const revision = await saving(() => sql.begin(async (tx) => {
+        await lockRevision(tx as unknown as Sql, id, latest, input.revision);
         if (latest.state === 'published') {
           const next = latest.version + 1;
           await tx`
@@ -813,10 +874,11 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
         }
         const [saved] = await tx`
           update content_versions set listing = ${listing}, state = 'draft', revision = revision + 1, updated_by = ${actor}, updated_at = now(), submitted_at = null
-          where entry_id = ${id} and version = ${latest.version} returning revision`;
+          where entry_id = ${id} and version = ${latest.version} and revision = ${input.revision} returning revision`;
+        if (!saved) throw new Stale();
         await tx`update content_entries set updated_at = now() where id = ${id}`;
-        return Number(saved!.revision);
-      }) as number;
+        return Number(saved.revision);
+      }) as Promise<number>, () => this.entry(teamId, id));
       return { revision };
     },
 
@@ -824,7 +886,10 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
     async author(teamId: string, userId: string) {
       const row = await ensureAuthor(sql, teamId, userId);
       const [photo] = row.photo_media_id ? await sql`select path from content_media where id = ${row.photo_media_id} and uploaded` : [];
-      return { ...authorView(row, (photo?.path as string | undefined) ?? null), published: await hasPublished(sql, teamId, userId) };
+      return {
+        ...authorView(row, (photo?.path as string | undefined) ?? null), photoMediaId: photo ? String(row.photo_media_id) : null,
+        published: await hasPublished(sql, teamId, userId),
+      };
     },
 
     async setAuthor(teamId: string, userId: string, input: { name: string; bio: string; color: MonogramColor; photoMediaId: string | null }) {
@@ -864,18 +929,18 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
       return { items: (row?.featured as FeaturedItem[] | undefined) ?? [] };
     },
 
-    /** Sets an app's featured list (items live in that app's catalog, at most five). Bumps the catalog version. */
+    /** Sets an app's featured list (items live in that app's catalog, at most five). Bumps the featured version only. */
     async setFeatured(teamId: string, actor: string, app: string, items: FeaturedItem[]) {
       if (items.length > 5) throw new ApiError(422, 'TOO_MANY_FEATURED', 'Feature at most five items');
       if (new Set(items.map((item) => item.id)).size !== items.length) throw new ApiError(422, 'FEATURED_TWICE', 'An item is featured twice');
       await sql.begin(async (tx) => {
         await tx`insert into content_catalogs (team_id, app_key) values (${teamId}, ${app}) on conflict do nothing`;
-        const [catalog] = await tx`select entries from content_catalogs where team_id = ${teamId} and app_key = ${app} for update`;
-        const live = new Set(((catalog!.entries as StoredEntry[]) ?? []).map((entry) => entry.id));
+        const [catalog] = await tx`select entries_v2 from content_catalogs where team_id = ${teamId} and app_key = ${app} for update`;
+        const live = new Set(((catalog!.entries_v2 as StoredEntry[]) ?? []).map((entry) => entry.id));
         const missing = items.filter((item) => !live.has(item.id));
         if (missing.length) throw new ApiError(422, 'NOT_PUBLISHED', `Only items published in ${app} can be featured`);
         await tx`
-          update content_catalogs set featured = ${tx.json(items as never)}, featured_version = featured_version + 1, version = version + 1, updated_at = now()
+          update content_catalogs set featured = ${tx.json(items as never)}, featured_version = featured_version + 1, updated_at = now()
           where team_id = ${teamId} and app_key = ${app}`;
         await audit(tx as unknown as Sql, teamId, actor, 'featured', app, { items: items.map((item) => item.id) });
       });
@@ -937,7 +1002,8 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
           on conflict (entry_id, user_id) do update set stars = excluded.stars, updated_at = now()`;
         return recountRatings(tx as unknown as Sql, id);
       }) as { average: number | null; count: number };
-      return { average: counted.average === null ? 0 : Math.round(counted.average * 10) / 10, count: counted.count, mine: stars };
+      // Like the catalog: no average until there are five ratings.
+      return { average: catalogRating(counted.average, counted.count)?.average ?? null, count: counted.count, mine: stars };
     },
 
     async myRating(app: string, id: string, userId: string) {
@@ -949,13 +1015,17 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
     /** Reports a live item for review. A second open report from the same person changes nothing. */
     async report(app: string, id: string, userId: string, input: { reason: ReportReason; details: string }) {
       await liveItem(app, id);
-      const [recent] = await sql`
-        select count(*)::int as count from content_collection_reports where user_id = ${userId} and created_at > ${new Date(now() - 86_400_000)}`;
-      if (Number(recent?.count ?? 0) >= COLLECTION_REPORTS_PER_DAY) throw new ApiError(429, 'RATE_LIMITED', 'Too many reports today');
-      await sql`
-        insert into content_collection_reports (entry_id, user_id, reason, details)
-        select ${id}, ${userId}, ${input.reason}, ${input.details}
-        where not exists (select 1 from content_collection_reports where entry_id = ${id} and user_id = ${userId} and state = 'open')`;
+      await sql.begin(async (tx) => {
+        // One person's reports one at a time, so the daily cap holds under concurrent requests.
+        await tx`select pg_advisory_xact_lock(hashtext(${userId}))`;
+        const [recent] = await tx`
+          select count(*)::int as count from content_collection_reports where user_id = ${userId} and created_at > ${new Date(now() - 86_400_000)}`;
+        if (Number(recent?.count ?? 0) >= COLLECTION_REPORTS_PER_DAY) throw new ApiError(429, 'RATE_LIMITED', 'Too many reports today');
+        await tx`
+          insert into content_collection_reports (entry_id, user_id, reason, details)
+          values (${id}, ${userId}, ${input.reason}, ${input.details})
+          on conflict do nothing`;
+      });
     },
 
     /**
@@ -971,13 +1041,15 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
       return { url: await storage().plusUrl(bundlePath, PLUS_LINK_SECONDS), expiresAt };
     },
 
-    /** Account deletion: someone's ratings (recounted) and reports. */
+    /** Account deletion: someone's ratings (recounted) and reports, and their author profile made anonymous. */
     async forgetUser(userId: string) {
       const rated = await sql`delete from content_ratings where user_id = ${userId} returning entry_id`;
       for (const entryId of new Set(rated.map((row) => String(row.entry_id)))) {
         await sql.begin((tx) => recountRatings(tx as unknown as Sql, entryId));
       }
       await sql`delete from content_collection_reports where user_id = ${userId}`;
+      // A team member's author profile stays on their published Collections, without anything about them.
+      await sql`update content_authors set name = 'Former author', bio = '', photo_media_id = null, updated_at = now() where user_id = ${userId}`;
     },
   };
 }
