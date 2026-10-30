@@ -2,7 +2,8 @@
 -- Hearken can stop bundling them and install them as Collections (scripts/import-hearken-subjects.ts,
 -- docs/hearken-collections-mapping.md).
 --
--- Adds item fields (subjectId, symbol, ruleVersion, contentVersion, the capstone), lesson fields
+-- Adds item fields (subjectId, symbol, order, the Scholar Path's title, summary and rules version,
+-- contentVersion, the capstone), lesson fields
 -- (the Hearken unit, course and stage it came from), and the link, step and assessment blocks
 -- (model.ts / hearken-blocks.ts). Existing fields, blocks and review steps are kept as they are,
 -- so every saved body stays valid. Only the shape changes; the listing settings are untouched.
@@ -18,7 +19,9 @@ set definition = jsonb_set(jsonb_set(jsonb_set(definition,
         {"key":"summary","label":"Summary","type":"text","required":false},
         {"key":"subjectId","label":"Hearken subject ID","type":"text","required":false},
         {"key":"symbol","label":"SF Symbol","type":"text","required":false},
+        {"key":"order","label":"Order in the Hearken subject list","type":"number","required":false},
         {"key":"pathTitle","label":"Scholar Path title","type":"text","required":false},
+        {"key":"pathSummary","label":"Scholar Path summary","type":"longtext","required":false},
         {"key":"ruleVersion","label":"Scholar rules version","type":"number","required":false},
         {"key":"contentVersion","label":"Hearken content version","type":"number","required":false},
         {"key":"capstoneId","label":"Capstone ID","type":"text","required":false},
