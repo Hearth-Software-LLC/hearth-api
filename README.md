@@ -105,6 +105,20 @@ diffs, bundles), `service.ts` (storage and publishing) and `routes.ts`.
   2. deploy hearth-api,
   3. `20261031100000_learning_module_listing_after_deploy.sql` (makes learning modules Collections;
      the old API can't read that type, so undo it before rolling the API back).
+- **Write with AI**: `POST /v1/content/entries/generate` (`src/content/write-with-ai.ts`) takes
+  `{ app (or null for shared), typeId, prompt (10–4000), length: short|medium|long, access: free|plus }`,
+  needs the author role on the app, and answers `text/event-stream`: one `data: <json>` per event,
+  `status` → `outline` → a `section` per finished section → `done { entryId, title, warnings }`, or
+  `error { code, message }` with nothing saved. Claude (`CONTENT_AI_MODEL`, default the ad-copy
+  Sonnet) plans an outline, then writes each section (three at a time) through tool calls, using
+  only text, callout, quiz, match and timeline blocks (plus scripture for Hearken's types) that the
+  type allows. Blocks are checked with `blockSchema` and `runChecks`, sent back once with the errors,
+  then dropped with a warning. The draft (and a Collection's listing with a template cover) is saved
+  through `createEntry` → `saveDraft` → `saveListing` and the audit log gets a `generate` row. Before
+  the stream: `422 TYPE_NOT_FOR_APP`/`SHARED_TYPE`/`NO_AI_BLOCKS`, `429 RATE_LIMITED` (20 per person
+  per day, quota `content-ai`), `503 AI_NOT_CONFIGURED` without `ANTHROPIC_API_KEY`. A generation is
+  cut off at 250 seconds (sections not started by then are left out with a warning), inside Vercel's
+  300-second default; it keeps going and saves if the client disconnects, as long as the function runs.
 - **Tests**: `tests/content/` (set `SOCIAL_TEST_DATABASE_URL` for the Postgres ones).
 
 ### Importing Hearken's subjects
@@ -211,7 +225,8 @@ Uncomment and replace the relevant settings in `.env`. Never commit it or put se
 | `SUPABASE_URL` | Hearth Supabase project URL (BigTable data, bank connections) |
 | `SUPABASE_SECRET_KEY` | Server-only Supabase secret key for that project |
 | `PLAID_TOKEN_KEY` | 32-byte base64 key that seals Plaid access tokens |
-| `ANTHROPIC_API_KEY` | BigTable AI meal plans, grocery lists and recipe import; Ember's cloud turn (`/v1/ember/turn`) and cloud understanding (`/v1/ember/understand`) |
+| `ANTHROPIC_API_KEY` | BigTable AI meal plans, grocery lists and recipe import; Ember's cloud turn (`/v1/ember/turn`) and cloud understanding (`/v1/ember/understand`); Hearth Content's Write with AI (`/v1/content/entries/generate`) |
+| `CONTENT_AI_MODEL` | The model Write with AI uses; default `claude-sonnet-5-5` |
 | `OPENAI_API_KEY` | BigTable recipe audio transcription |
 | `GEMINI_API_KEY` | BigTable generated recipe images |
 | `GOOGLE_PLACES_API_KEY` | BigTable dine-out place search |
