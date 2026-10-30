@@ -94,13 +94,17 @@ diffs, bundles), `service.ts` (storage and publishing) and `routes.ts`.
 - **Apps read** `GET /v1/content/<app>/catalog` without a token: their own items plus every shared
   one, `Cache-Control: public, max-age=60` and an ETag. Scheduled publishes go out when a catalog
   is read or `/internal/content/cron` runs.
-- **Collections** (`20261031090000_content_collections.sql`): downloadable types (learning modules)
-  have a listing and cover per version, author profiles, ratings, reports and a featured list per
-  app. Plus bundles go to the private `hearth-content-plus` bucket (the migration creates it, like
-  `hearth-content`; create it by hand as a private bucket if the migration ran without the storage
-  schema). `GET /v1/content/<app>/catalog?format=2` is the Collections catalog; without `format`
-  it's unchanged for older builds and leaves Plus items out. Rating, reporting and downloading use
-  the normal Hearth token. See API-ARCHITECTURE.md.
+- **Collections**: downloadable types (learning modules) have a listing and cover per version,
+  author profiles, ratings, reports and a featured list per app. Plus bundles go to the private
+  `hearth-content-plus` bucket (the migration creates it, like `hearth-content`; create it by hand
+  as a private bucket if the migration ran without the storage schema).
+  `GET /v1/content/<app>/catalog?format=2` is the Collections catalog; without `format` it's
+  unchanged for older builds and leaves Plus items out. Rating, reporting and downloading use the
+  normal Hearth token. See API-ARCHITECTURE.md. **Deploy in this order:**
+  1. `20261031090000_content_collections.sql` (tables and columns only; safe with the old API live),
+  2. deploy hearth-api,
+  3. `20261031100000_learning_module_listing_after_deploy.sql` (makes learning modules Collections;
+     the old API can't read that type, so undo it before rolling the API back).
 - **Tests**: `tests/content/` (set `SOCIAL_TEST_DATABASE_URL` for the Postgres ones).
 
 ## Account deletion

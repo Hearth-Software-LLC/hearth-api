@@ -169,7 +169,10 @@ Collections are Hearth Content items people browse and download in the apps (`sr
 - **People in the apps** rate (`PUT …/items/{id}/rating`, one rating each) and report (`POST …/items/{id}/report`) with their normal Hearth token; they don't need the content team. Both are rate-limited. A rating recounts the item and refreshes its entry in the catalog in the same transaction; the catalog shows ratings from five.
 - **The team** edits author profiles (`/v1/content/authors/me`), sees their Collections (`/authors/me/collections`), features up to five items per app (`/catalogs/{app}/featured`, publishers) and reviews reports (`/reports`, `/reports/{id}/dismiss`, publishers). Reports never show who sent them.
 
-Account deletion removes the person's ratings (recounting each item) and reports.
+- **Catalog storage:** each `content_catalogs` row keeps `entries` exactly as format 1 serves it (free items, today's fields), so an older API build still serves what it always did, and `entries_v2` with every item. Ratings and featured changes bump `ratings_version` and `featured_version`, which only the format-2 ETag uses; `version` changes only when content does.
+- **Deploying:** 1) apply `20261031090000_content_collections.sql` (it only adds tables and columns; safe with the old API live), 2) deploy this API, 3) apply `20261031100000_learning_module_listing_after_deploy.sql`, which makes learning modules Collections. An API from before Collections returns 500 on that type definition, so undo step 3 before rolling the API back (the migration's header has the SQL).
+
+Account deletion removes the person's ratings (recounting each item) and reports, and makes their author profile anonymous ("Former author", no bio or photo).
 
 ### Food Data Providers
 
