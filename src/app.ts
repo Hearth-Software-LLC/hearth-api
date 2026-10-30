@@ -96,6 +96,7 @@ import type { StudioNotifier } from './studio/notify.js';
 import { PUBLIC_CATALOG, registerContent } from './content/routes.js';
 import { createContentService } from './content/service.js';
 import type { ContentService, ContentStorage } from './content/service.js';
+import type { WriteWithAiDependencies } from './content/write-with-ai.js';
 
 export type AppOptions = {
   config?: Config;
@@ -140,7 +141,8 @@ export type AppOptions = {
     plans?: PlansBackend; apps?: GitHubApps; notifier?: StudioNotifier; sql?: Sql; monetization?: MonetizationBackend; storeProducts?: StoreProducts; planDefinitions?: PlanStore;
   };
   /** Hearth Content (/v1/content). Built from DATABASE_URL and Supabase storage when not given. */
-  content?: { service?: ContentService; storage?: ContentStorage };
+  /** `writeWithAi`: Write with AI's Claude settings; reads ANTHROPIC_API_KEY and CONTENT_AI_MODEL when not given. */
+  content?: { service?: ContentService; storage?: ContentStorage; writeWithAi?: Partial<WriteWithAiDependencies> };
   /** Affiliates and campaign links. Built from DATABASE_URL, SOCIAL_TOKEN_KEY and ASC_* when not given. */
   affiliates?: { service?: AffiliateService; links?: LinkService; importStats?: (team: string) => Promise<unknown> };
 };
@@ -433,6 +435,13 @@ export function createApp(options: AppOptions = {}) {
     reserveQuota,
     // Plus Collections: hearth_plus or the app's own plan (own or the household organizer's).
     plusAccess: createCollectionAccess(config.ENFORCE_ENTITLEMENTS, entitlementSource),
+    // Write with AI: drafts from a description (Claude, tool calls; the same Sonnet as ad copy by default).
+    writeWithAi: {
+      anthropicApiKey: process.env.ANTHROPIC_API_KEY?.trim() || undefined,
+      model: process.env.CONTENT_AI_MODEL?.trim() || undefined,
+      fetcher: options.fetcher ?? fetch,
+      ...options.content?.writeWithAi,
+    },
   });
   // Scheduled publishes also go out whenever an app reads its catalog; this catches quiet periods.
   app.get('/internal/content/cron', async (context) => {

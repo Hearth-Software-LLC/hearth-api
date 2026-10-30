@@ -1,5 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import type { Context } from 'hono';
+import { streamSSE } from 'hono/streaming';
 import type { OpenAPIHono, RouteConfig } from '@hono/zod-openapi';
 import { errorSchema } from '../contracts/common.js';
 import type { ApiEnvironment } from '../contracts/common.js';
@@ -14,6 +15,8 @@ import { BLOCK_KINDS, BLOCK_LIBRARY, COVERS, bodySchema, definitionSchema, listi
 import type { MonogramColor } from './model.js';
 import { FEATURED_LABELS, MEDIA_TYPES, REPORT_REASONS } from './service.js';
 import type { ContentService, MediaType } from './service.js';
+import { aiBlocks, generateRequestSchema, writeDraft } from './write-with-ai.js';
+import type { WriteWithAiDependencies } from './write-with-ai.js';
 
 /**
  * Hearth Content's API (content.hearthapps.com): content types, items, review, media and
@@ -32,6 +35,8 @@ export type ContentDependencies = {
   reserveQuota: ReserveQuota;
   /** Throws 402 ENTITLEMENT_REQUIRED unless the person may download the app's Plus Collections. */
   plusAccess: (userId: string, app: string) => Promise<void>;
+  /** Write with AI (POST /v1/content/entries/generate): Claude's key, model and fetch. */
+  writeWithAi?: WriteWithAiDependencies;
 };
 
 /** Publishing and rolling back need a sign-in from the last 12 hours. */
@@ -344,6 +349,38 @@ export function registerContent(app: OpenAPIHono<ApiEnvironment>, dependencies: 
     const input = context.req.valid('json');
     const caller = need(context, input.app, 'author');
     return context.json(await content().createEntry(caller.teamId, caller.userId, input), 200);
+  });
+
+  app.openapi(route({
+    method: 'post', path: '/v1/content/entries/generate',
+    summary: 'Write with AI: Claude writes a complete draft from a description (authors and up), streamed as Server-Sent Events',
+    description: 'Each event is `data: <json>`: `status` {stage, message}, `outline` {title, sections: [{title}]}, `section` {index, title, blocks} '
+      + 'per finished section (one for a flat body), then `done` {entryId, title, warnings} once the draft is saved, or `error` {code, message} '
+      + '(nothing saved). Errors before the stream starts are JSON: 400, 403, 404, 422 (type not for this app, or no blocks Claude can write), '
+      + '429 RATE_LIMITED (20 a day), 503 AI_NOT_CONFIGURED. A client that disconnects doesn’t stop the draft being saved (best effort).',
+    request: body(generateRequestSchema),
+    responses: { 200: { description: 'text/event-stream of status, outline, section, done and error events', content: { 'text/event-stream': { schema: z.string() } } }, ...errors },
+  }), async (context) => {
+    const input = context.req.valid('json');
+    const appName = input.app ?? 'shared';
+    const caller = need(context, appName, 'author');
+    const ai = dependencies.writeWithAi;
+    if (!ai?.anthropicApiKey) throw new ApiError(503, 'AI_NOT_CONFIGURED', 'Write with AI is not configured');
+    const type = await content().type(caller.teamId, input.typeId);
+    if (type.app !== null && type.app !== appName) throw new ApiError(422, 'TYPE_NOT_FOR_APP', `${type.name} is only for ${type.app}`);
+    if (type.app === null && appName !== 'shared') throw new ApiError(422, 'SHARED_TYPE', `${type.name} is shared content: make it under Shared`);
+    if (aiBlocks(type).length === 0) throw new ApiError(422, 'NO_AI_BLOCKS', `${type.name} has no blocks Write with AI can write`);
+    await dependencies.reserveQuota(caller.userId, 'content-ai');
+    const service = content();
+    const dependenciesWithKey = { ...ai, anthropicApiKey: ai.anthropicApiKey };
+    return streamSSE(context, async (stream) => {
+      // Writes stop when the client goes; the draft is still written and saved.
+      const emit = async (event: unknown) => {
+        if (stream.aborted || stream.closed) return;
+        await stream.writeSSE({ data: JSON.stringify(event) }).catch(() => undefined);
+      };
+      await writeDraft({ content: service, teamId: caller.teamId, actor: caller.userId, app: appName, type, request: input, dependencies: dependenciesWithKey, emit });
+    });
   });
 
   app.openapi(route({

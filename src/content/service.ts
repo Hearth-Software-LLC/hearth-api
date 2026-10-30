@@ -540,6 +540,11 @@ export function createContentService(sql: Sql, options: { storage?: ContentStora
       return this.entry(teamId, id);
     },
 
+    /** Notes in the audit log that Write with AI wrote an item's draft (what it made, never the prompt). */
+    async noteGenerated(teamId: string, actor: string, id: string, detail: Record<string, unknown>) {
+      await audit(sql, teamId, actor, 'generate', id, detail);
+    },
+
     async remove(teamId: string, actor: string, id: string) {
       const row = await entryRow(sql, teamId, id);
       if (row.live_version != null) throw new ApiError(409, 'PUBLISHED', 'Unpublish it first: apps are using it');
