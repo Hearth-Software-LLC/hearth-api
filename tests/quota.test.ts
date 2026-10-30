@@ -69,6 +69,17 @@ describe('shared quotas', () => {
     await expect(createQuota(config)('user-123', 'foods')).rejects.toMatchObject({ status: 503, code: 'QUOTA_UNAVAILABLE' });
   });
 
+  it('caps Write with AI at 20 drafts per person per day', async () => {
+    const { Ratelimit: Limiter } = await import('@upstash/ratelimit');
+    limit.mockResolvedValue(allowed);
+    await createQuota(config)('user-123', 'content-ai');
+    expect(Limiter.fixedWindow).toHaveBeenCalledWith(20, '1 d');
+    expect(limit).toHaveBeenCalledTimes(1);
+    expect(limit.mock.calls[0]?.[0]).toMatch(/^content-ai:[a-f0-9]{64}$/);
+    limit.mockResolvedValue({ ...allowed, success: false });
+    await expect(createQuota(config)('user-123', 'content-ai')).rejects.toMatchObject({ status: 429, code: 'RATE_LIMITED' });
+  });
+
   it('sanitizes Redis failures', async () => {
     limit.mockRejectedValue(new Error('test-redis-token'));
     await expect(createQuota(config)('user-123', 'foods')).rejects.toMatchObject({ status: 503, message: 'Provider access is temporarily unavailable' });

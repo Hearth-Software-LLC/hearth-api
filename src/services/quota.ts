@@ -4,7 +4,7 @@ import { Ratelimit } from '@upstash/ratelimit';
 import type { Config } from '../config.js';
 import { ApiError } from '../errors.js';
 
-export type ReserveQuota = (userId: string, operation: 'foods' | 'logos' | 'restaurants' | 'plaid-link' | 'banking' | 'ember' | 'ember-speech' | 'marketing' | 'collections') => Promise<void>;
+export type ReserveQuota = (userId: string, operation: 'foods' | 'logos' | 'restaurants' | 'plaid-link' | 'banking' | 'ember' | 'ember-speech' | 'marketing' | 'collections' | 'content-ai') => Promise<void>;
 
 export function createQuota(config: Config): ReserveQuota {
   if (!config.UPSTASH_REDIS_REST_URL || !config.UPSTASH_REDIS_REST_TOKEN) {
@@ -59,6 +59,16 @@ export function createQuota(config: Config): ReserveQuota {
     ephemeralCache: false,
     timeout: 3000,
   });
+  // Hearth Content's Write with AI: an outline plus a call per section, so each is a dozen or so
+  // Sonnet calls. 20 drafts per person per day.
+  const contentAiUserLimit = new Ratelimit({
+    redis,
+    limiter: Ratelimit.fixedWindow(20, '1 d'),
+    prefix: `${config.RATE_LIMIT_PREFIX}:content-ai-user`,
+    analytics: false,
+    ephemeralCache: false,
+    timeout: 3000,
+  });
   const plaidGlobalLimit = new Ratelimit({
     redis,
     limiter: Ratelimit.fixedWindow(100, '1 h'),
@@ -82,7 +92,8 @@ export function createQuota(config: Config): ReserveQuota {
   return async (userId, operation) => {
     try {
       const identifier = createHash('sha256').update(userId).digest('hex');
-      const limiter = operation === 'plaid-link' ? plaidUserLimit : operation === 'marketing' ? marketingUserLimit : userLimit;
+      const limiter = operation === 'plaid-link' ? plaidUserLimit : operation === 'marketing' ? marketingUserLimit
+        : operation === 'content-ai' ? contentAiUserLimit : userLimit;
       const userResult = await limiter.limit(`${operation}:${identifier}`);
       if (userResult.reason === 'timeout') throw new Error('Quota timeout');
       if (!userResult.success) {
