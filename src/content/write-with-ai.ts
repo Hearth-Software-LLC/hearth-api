@@ -605,7 +605,8 @@ export async function writeDraft(options: {
         else {
           stats.dropped += 1;
           const kind = (reply!.input.blocks[n] as { type?: unknown } | null)?.type;
-          warnings.push(`${where}left out a ${typeof kind === 'string' && kind in BLOCK_LIBRARY ? BLOCK_LIBRARY[kind as BlockKind].label.toLowerCase() : 'block'} that didn’t pass (${result.errors[0]})`);
+          const name = typeof kind === 'string' && kind in BLOCK_LIBRARY ? `${BLOCK_LIBRARY[kind as BlockKind].label.toLowerCase()} block` : 'block';
+          warnings.push(`${where}left out ${/^[aeiou]/.test(name) ? 'an' : 'a'} ${name} that didn’t pass (${result.errors[0]})`);
         }
       });
       results[slot] = { title, fields: fieldValues(definition.sections?.fields ?? [], reply.input.fields), blocks };
