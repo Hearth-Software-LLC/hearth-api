@@ -131,10 +131,47 @@ export function registerContent(app: OpenAPIHono<ApiEnvironment>, dependencies: 
 
   // MARK: You and the apps
 
+  /** You, with a signed link to your profile photo: the same one Hearth Studio shows. */
+  const meView = async (caller: Member) => {
+    const lib = dependencies.library();
+    const avatarUrl = caller.avatarPath && lib ? await lib.avatarUrl(caller.avatarPath).catch(() => null) : null;
+    return { ...memberView(caller), avatarUrl };
+  };
+
   app.openapi(route({
-    method: 'get', path: '/v1/content/me', summary: 'The caller: team role, content role and apps',
+    method: 'get', path: '/v1/content/me', summary: 'The caller: team role, content role, apps and profile photo',
     responses: { 200: anyJson('You'), ...errors },
-  }), async (context) => context.json(memberView(member(context)), 200));
+  }), async (context) => context.json(await meView(member(context)), 200));
+
+  // The profile photo lives on the team membership, so Hearth Studio and Hearth Content share it.
+  // These match /v1/studio/me/avatar for people who only have Hearth Content.
+  app.openapi(route({
+    method: 'post', path: '/v1/content/me/avatar/upload',
+    summary: 'Where to PUT your new profile photo (then PUT /v1/content/me/avatar with its path)',
+    request: body(z.object({ sha256: z.string().regex(/^[0-9a-f]{64}$/), bytes: z.number().int().min(1), contentType: z.enum(['image/jpeg', 'image/png', 'image/webp']) }).strict()),
+    responses: { 200: anyJson('Upload target'), ...errors },
+  }), async (context) => {
+    const caller = member(context);
+    const lib = required(dependencies.library, 'Profile photos');
+    return context.json(await lib.startAvatarUpload(caller.teamId, caller.userId, context.req.valid('json')), 200);
+  });
+
+  app.openapi(route({
+    method: 'put', path: '/v1/content/me/avatar', summary: 'Use an uploaded profile photo (path from the upload), or null to remove it',
+    request: body(z.object({ path: z.string().min(10).max(300).nullable() }).strict()),
+    responses: { 200: anyJson('You'), ...errors },
+  }), async (context) => {
+    const caller = member(context);
+    const { path } = context.req.valid('json');
+    if (path !== null && !path.startsWith(`${caller.teamId}/avatars/${caller.userId}/`)) {
+      throw new ApiError(400, 'INVALID_REQUEST', 'That isn’t your uploaded photo');
+    }
+    const teams = required(dependencies.team, 'Hearth Studio');
+    const previous = await teams.setAvatar(caller.teamId, caller.userId, path);
+    if (previous && previous !== path) await dependencies.library()?.removeAvatar(previous);
+    const updated = (await teams.members(caller.teamId)).find((entry) => entry.userId === caller.userId)!;
+    return context.json(await meView(updated), 200);
+  });
 
   app.openapi(route({
     method: 'get', path: '/v1/content/apps',

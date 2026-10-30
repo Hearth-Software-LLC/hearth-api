@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import postgres from 'postgres';
 import { createApp } from '../../src/app.js';
+import { createLibraryService } from '../../src/studio/library.js';
+import type { StudioStorage } from '../../src/studio/library.js';
 import { readConfig } from '../../src/config.js';
 import { diffBodies, isScriptureRef, runChecks } from '../../src/content/model.js';
 import type { Body, TypeDefinition } from '../../src/content/model.js';
@@ -68,6 +70,13 @@ describe.skipIf(!url)('Hearth Content (Postgres)', () => {
     uploadUrl: async (path) => ({ url: `https://storage.test/upload/${path}`, token: 't' }),
     publicUrl: (path) => `https://cdn.test/${path}`,
   };
+  let removedAvatars: string[];
+  const studioStorage: StudioStorage = {
+    uploadUrl: async (path) => ({ url: `https://storage.test/upload/${path}`, token: 'upload-token' }),
+    signedUrl: async (path) => `https://storage.test/signed/${path}`,
+    remove: async (paths) => { removedAvatars.push(...paths); },
+    put: async () => undefined,
+  };
   const apps: GitHubApps = {
     list: async () => [
       { key: 'hearken', name: 'Hearken', accent: '#3B74D9', bundleId: 'com.stephenwarren.hearken', iconPath: null, repo: 'Hearth-Software-LLC/hearken', defaultBranch: 'main', icon: null },
@@ -84,6 +93,7 @@ describe.skipIf(!url)('Hearth Content (Postgres)', () => {
   beforeEach(async () => {
     await reset(sql);
     stored = new Map();
+    removedAvatars = [];
     clock = Date.now();
     app = createApp({
       config: readConfig({ SOCIAL_OWNER_IDS: steve }),
@@ -93,7 +103,7 @@ describe.skipIf(!url)('Hearth Content (Postgres)', () => {
       }),
       reserveQuota: async () => undefined,
       entitlements: async () => [],
-      studio: { team: createTeamService(sql, { ownerIds: [steve] }), apps, sql },
+      studio: { team: createTeamService(sql, { ownerIds: [steve] }), library: createLibraryService(sql, { storage: studioStorage, limitBytes: 1000 }), apps, sql },
       content: { service: createContentService(sql, { storage, now: () => clock }) },
     });
   });
@@ -120,6 +130,31 @@ describe.skipIf(!url)('Hearth Content (Postgres)', () => {
     const types = await call('steve', 'GET', '/v1/content/types');
     return types.body.types.find((type: { slug: string }) => type.slug === 'learning-module');
   };
+
+  it('shares one profile photo between Hearth Studio and Hearth Content', async () => {
+    await join('author', { post: false, content: { role: 'author', apps: ['hearken'] } });
+    const hash = (n: number) => n.toString(16).padStart(64, '0');
+
+    // Set in Hearth Studio, seen in Hearth Content.
+    const studio = await call('steve', 'POST', '/v1/studio/me/avatar/upload', { sha256: hash(1), bytes: 2048, contentType: 'image/jpeg' });
+    expect((await call('steve', 'PUT', '/v1/studio/me/avatar', { path: studio.body.path })).status).toBe(200);
+    expect((await call('steve', 'GET', '/v1/content/me')).body.avatarUrl).toBe(`https://storage.test/signed/${studio.body.path}`);
+
+    // Set in Hearth Content (a content-only member, who can't reach /v1/studio), seen by the team.
+    const started = await call('author', 'POST', '/v1/content/me/avatar/upload', { sha256: hash(2), bytes: 2048, contentType: 'image/jpeg' });
+    expect(started.status).toBe(200);
+    expect(started.body.path).toMatch(new RegExp(`/avatars/${users.author}/${hash(2)}\\.jpg$`));
+    const set = await call('author', 'PUT', '/v1/content/me/avatar', { path: started.body.path });
+    expect(set.body.avatarUrl).toBe(`https://storage.test/signed/${started.body.path}`);
+    const members = await call('steve', 'GET', '/v1/studio/members');
+    expect(members.body.members.find((entry: { userId: string }) => entry.userId === users.author).avatarUrl).toBe(`https://storage.test/signed/${started.body.path}`);
+
+    // Only your own uploads; replacing or removing cleans up the old file.
+    expect((await call('author', 'PUT', '/v1/content/me/avatar', { path: studio.body.path })).body.error.code).toBe('INVALID_REQUEST');
+    expect((await call('author', 'PUT', '/v1/content/me/avatar', { path: null })).body.avatarUrl).toBeNull();
+    expect(removedAvatars).toEqual([started.body.path]);
+    expect((await call('author', 'POST', '/v1/content/me/avatar/upload', { sha256: hash(3), bytes: 6 * 1024 * 1024, contentType: 'image/jpeg' })).body.error.code).toBe('FILE_TOO_LARGE');
+  });
 
   it('brings in content-only people with a code and keeps Hearth Studio hidden from them', async () => {
     expect((await call('steve', 'POST', '/v1/studio/invites', { post: false })).body.error.code).toBe('INVITE_EMPTY');
