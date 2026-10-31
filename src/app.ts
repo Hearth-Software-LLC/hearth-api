@@ -72,6 +72,12 @@ import { registerAffiliates } from './affiliates/routes.js';
 import { createAffiliateService } from './affiliates/service.js';
 import type { AffiliateService } from './affiliates/service.js';
 import { createLinkService } from './affiliates/links.js';
+import { createResend } from './email/resend.js';
+import type { Resend } from './email/resend.js';
+import { PUBLIC_BETA, registerWaitlist } from './waitlist/routes.js';
+import { createWaitlistService } from './waitlist/service.js';
+import type { WaitlistService } from './waitlist/service.js';
+import { createWaitlistLimit } from './services/quota.js';
 import type { LinkService } from './affiliates/links.js';
 import { createAscClient, importCampaignStats } from './affiliates/asc.js';
 import { setAffiliateCredit } from './affiliates/hook.js';
@@ -145,6 +151,8 @@ export type AppOptions = {
   content?: { service?: ContentService; storage?: ContentStorage; writeWithAi?: Partial<WriteWithAiDependencies> };
   /** Affiliates and campaign links. Built from DATABASE_URL, SOCIAL_TOKEN_KEY and ASC_* when not given. */
   affiliates?: { service?: AffiliateService; links?: LinkService; importStats?: (team: string) => Promise<unknown> };
+  /** The beta waitlist and pages. Built from DATABASE_URL, SOCIAL_TOKEN_KEY and RESEND_* when not given. */
+  waitlist?: { service?: WaitlistService; resend?: Resend; allow?: (key: string) => Promise<boolean> };
 };
 
 type RequestLog = {
@@ -242,6 +250,8 @@ export function createApp(options: AppOptions = {}) {
     // Each Hearth app reads its content catalog without signing in (Collections' rating, report
     // and download routes under /v1/content/<app>/items/ still need a token).
     if (context.req.method === 'GET' && PUBLIC_CATALOG.test(context.req.path)) return next();
+    // The website's waitlist form, its confirm link and the beta pages' details.
+    if (['GET', 'POST', 'OPTIONS'].includes(context.req.method) && PUBLIC_BETA.test(context.req.path)) return next();
     return requireAuth(context, next);
   });
 
@@ -459,7 +469,7 @@ export function createApp(options: AppOptions = {}) {
     : undefined);
   setAffiliateCredit(affiliateService);
   const linkService = options.affiliates?.links ?? (database
-    ? createLinkService(database, { providerId: config.ASC_PROVIDER_ID, shortBase: config.SHORT_LINK_BASE })
+    ? createLinkService(database, { providerId: config.ASC_PROVIDER_ID, shortBase: config.SHORT_LINK_BASE, siteBase: config.SITE_URL })
     : undefined);
   const importStats = options.affiliates?.importStats ?? (database && linkService && config.ASC_KEY_ID && config.ASC_ISSUER_ID && config.ASC_PRIVATE_KEY
     ? ((client) => (team: string) => importCampaignStats(database, client, linkService, team))(
@@ -475,6 +485,25 @@ export function createApp(options: AppOptions = {}) {
       : undefined),
     importStats: () => importStats,
   });
+  // The beta funnel: waitlist sign-ups and confirmations, beta pages, TestFlight taps, launch emails.
+  const resend = options.waitlist?.resend ?? (config.RESEND_API_KEY && config.RESEND_FROM
+    ? createResend({ apiKey: config.RESEND_API_KEY, from: config.RESEND_FROM, replyTo: config.RESEND_REPLY_TO, fetcher: options.fetcher ?? fetch })
+    : undefined);
+  const waitlistService = options.waitlist?.service ?? (database && config.SOCIAL_TOKEN_KEY
+    ? createWaitlistService(database, {
+      resend,
+      tokenKey: Buffer.from(hkdfSync('sha256', Buffer.from(config.SOCIAL_TOKEN_KEY, 'base64'), Buffer.alloc(0), 'hearth-waitlist-confirm', 32)),
+      apiBase: config.PUBLIC_BASE_URL,
+      siteBase: config.SITE_URL,
+    })
+    : undefined);
+  const waitlistAllow = options.waitlist?.allow ?? createWaitlistLimit(config);
+  registerWaitlist(app, {
+    service: () => waitlistService,
+    ...(waitlistAllow ? { allow: waitlistAllow } : {}),
+    webhookSecret: config.RESEND_WEBHOOK_SECRET,
+  });
+
   // App Store Connect's campaign numbers, daily (they arrive a day or two late).
   app.get('/internal/affiliates/cron', async (context) => {
     requireCronSecret(config, context.req.header('Authorization'));

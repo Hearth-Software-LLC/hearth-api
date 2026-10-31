@@ -137,3 +137,25 @@ export function createQuota(config: Config): ReserveQuota {
 function retryAfter(reset: number) {
   return Math.max(1, Math.ceil((reset - Date.now()) / 1000));
 }
+/**
+ * The website's waitlist form: 5 sign-ups an hour per address and network. Undefined (no limit)
+ * when Upstash isn't configured.
+ */
+export function createWaitlistLimit(config: Config): ((key: string) => Promise<boolean>) | undefined {
+  if (!config.UPSTASH_REDIS_REST_URL || !config.UPSTASH_REDIS_REST_TOKEN) return undefined;
+  const limit = new Ratelimit({
+    redis: new Redis({ url: config.UPSTASH_REDIS_REST_URL, token: config.UPSTASH_REDIS_REST_TOKEN, retry: false }),
+    limiter: Ratelimit.fixedWindow(5, '1 h'),
+    prefix: `${config.RATE_LIMIT_PREFIX}:waitlist`,
+    analytics: false,
+    ephemeralCache: false,
+    timeout: 3000,
+  });
+  return async (key) => {
+    try {
+      return (await limit.limit(key)).success;
+    } catch {
+      return true;   // Upstash down: let the sign-up through rather than lose it.
+    }
+  };
+}

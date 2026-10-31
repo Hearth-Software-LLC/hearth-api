@@ -100,6 +100,15 @@ const configSchema = z.object({
   ASC_PROVIDER_ID: z.string().trim().regex(/^\d{3,15}$/).optional(),
   // Where short links live (GET /go/<slug> on this API, or a site that forwards there).
   SHORT_LINK_BASE: httpsUrl.default('https://hearthapps.com/go'),
+  // Email through Resend (src/email): the beta waitlist's confirmations and launch emails. Any
+  // address on a verified Resend domain can send; RESEND_FROM is e.g. "Hearth <hello@mail.hearthapps.com>".
+  RESEND_API_KEY: z.string().trim().startsWith('re_').min(10).optional(),
+  RESEND_FROM: z.string().trim().min(3).max(200).optional(),
+  RESEND_REPLY_TO: z.email().default('support@hearthapps.com'),
+  // Resend › Webhooks › signing secret, for bounces, complaints and unsubscribes.
+  RESEND_WEBHOOK_SECRET: z.string().trim().startsWith('whsec_').optional(),
+  // The website: beta pages, and where the waitlist's thanks and confirmed pages live.
+  SITE_URL: httpsUrl.default('https://hearthapps.com'),
   // Credit sandbox purchases to affiliates (for testing only).
   AFFILIATES_ACCEPT_SANDBOX: z.enum(['true', 'false', '1', '0']).default('false')
     .transform((value) => value === 'true' || value === '1'),
@@ -125,6 +134,7 @@ const configSchema = z.object({
     ['META_APP_ID', 'META_APP_SECRET'] as const,
     ['GITHUB_APP_ID', 'GITHUB_APP_PRIVATE_KEY'] as const,
     ['ASC_KEY_ID', 'ASC_ISSUER_ID', 'ASC_PRIVATE_KEY'] as const,
+    ['RESEND_API_KEY', 'RESEND_FROM'] as const,
   ]) {
     const count = group.filter((name) => config[name] !== undefined).length;
     if (count > 0 && count < group.length) {

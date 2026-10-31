@@ -11,10 +11,15 @@ export const STAT_METRICS = ['page_views', 'downloads', 'redownloads', 'proceeds
 export type StatMetric = (typeof STAT_METRICS)[number];
 export type Totals = Record<StatMetric, number> & { taps: number };
 
+export type LinkDestination = 'app_store' | 'beta';
+
 export type LinkView = {
-  id: string; app: string; name: string; ct: string; appStoreId: string; slug: string | null;
+  id: string; app: string; name: string; ct: string;
+  /** Null for a beta link (it goes to hearthapps.com/beta/<app>, not the App Store). */
+  appStoreId: string | null; slug: string | null;
+  destination: LinkDestination; postId: string | null;
   affiliateId: string | null; affiliateName: string | null;
-  /** The App Store link itself, and the short form when there is one. */
+  /** Where the link goes (the App Store, or the app's beta page), and the short form when there is one. */
   url: string; shortUrl: string | null;
   totals: Totals;
   createdAt: string;
@@ -41,11 +46,22 @@ export function slugify(value: string) {
 
 export type LinkService = ReturnType<typeof createLinkService>;
 
-export function createLinkService(sql: Sql, options: { providerId?: string | undefined; shortBase: string; now?: () => number }) {
+/** An app's beta page, crediting a short link when it has one. */
+export function betaPageUrl(siteBase: string, app: string, slug: string | null) {
+  const url = `${siteBase.replace(/\/+$/, '')}/beta/${app}`;
+  return slug ? `${url}?via=${encodeURIComponent(slug)}` : url;
+}
+
+export function createLinkService(sql: Sql, options: { providerId?: string | undefined; shortBase: string; siteBase?: string; now?: () => number }) {
   const now = options.now ?? Date.now;
   const base = options.shortBase.replace(/\/+$/, '');
+  const site = options.siteBase ?? 'https://hearthapps.com';
+  const target = (row: Record<string, unknown>) =>
+    row.destination === 'beta'
+      ? betaPageUrl(site, String(row.app), (row.slug as string | null) ?? null)
+      : appStoreUrl(String(row.app_store_id), String(row.ct), options.providerId);
 
-  async function views(team: string, filter: { id?: string; app?: string; affiliateId?: string; days: number }): Promise<LinkView[]> {
+  async function views(team: string, filter: { id?: string; app?: string; affiliateId?: string; destination?: LinkDestination | 'all'; days: number }): Promise<LinkView[]> {
     const since = new Date(now() - filter.days * 86_400_000).toISOString().slice(0, 10);
     const rows = await sql`
       select l.*, a.name as affiliate_name,
@@ -58,6 +74,7 @@ export function createLinkService(sql: Sql, options: { providerId?: string | und
         and (${filter.id ?? null}::uuid is null or l.id = ${filter.id ?? null})
         and (${filter.app ?? null}::text is null or l.app = ${filter.app ?? null})
         and (${filter.affiliateId ?? null}::uuid is null or l.affiliate_id = ${filter.affiliateId ?? null})
+        and (${filter.destination ?? 'all'} = 'all' or l.destination = ${filter.destination ?? 'all'})
       order by l.created_at desc`;
     return rows.map((row) => {
       const totals = zero();
@@ -66,10 +83,14 @@ export function createLinkService(sql: Sql, options: { providerId?: string | und
         if ((STAT_METRICS as readonly string[]).includes(metric)) totals[metric as StatMetric] = Number(value);
       }
       return {
-        id: String(row.id), app: String(row.app), name: String(row.name), ct: String(row.ct), appStoreId: String(row.app_store_id),
-        slug: (row.slug as string | null) ?? null, affiliateId: (row.affiliate_id as string | null) ?? null,
+        id: String(row.id), app: String(row.app), name: String(row.name), ct: String(row.ct),
+        appStoreId: row.app_store_id == null ? null : String(row.app_store_id),
+        slug: (row.slug as string | null) ?? null,
+        destination: row.destination === 'beta' ? 'beta' as const : 'app_store' as const,
+        postId: (row.post_id as string | null) ?? null,
+        affiliateId: (row.affiliate_id as string | null) ?? null,
         affiliateName: (row.affiliate_name as string | null) ?? null,
-        url: appStoreUrl(String(row.app_store_id), String(row.ct), options.providerId),
+        url: target(row),
         shortUrl: row.slug ? `${base}/${String(row.slug)}` : null,
         totals, createdAt: iso(row.created_at),
       };
@@ -83,8 +104,14 @@ export function createLinkService(sql: Sql, options: { providerId?: string | und
   }
 
   return {
-    list: (team: string, filter: { app?: string; affiliateId?: string; days?: number } = {}) => {
-      const query: { app?: string; affiliateId?: string; days: number } = { days: filter.days ?? 30 };
+    /**
+     * Links with their numbers. App Store links only unless `destination` says otherwise: app
+     * builds from before beta links read `appStoreId` as always present.
+     */
+    list: (team: string, filter: { app?: string; affiliateId?: string; destination?: LinkDestination | 'all'; days?: number } = {}) => {
+      const query: { app?: string; affiliateId?: string; destination: LinkDestination | 'all'; days: number } = {
+        days: filter.days ?? 30, destination: filter.destination ?? 'app_store',
+      };
       if (filter.app) query.app = filter.app;
       if (filter.affiliateId) query.affiliateId = filter.affiliateId;
       return views(team, query);
@@ -92,8 +119,17 @@ export function createLinkService(sql: Sql, options: { providerId?: string | und
     get: one,
 
     async create(team: string, by: string, input: {
-      app: string; name: string; appStoreId: string; ct?: string | undefined; slug?: string | null | undefined; affiliateId?: string | null | undefined;
+      app: string; name: string; appStoreId?: string | undefined; ct?: string | undefined; slug?: string | null | undefined;
+      affiliateId?: string | null | undefined; destination?: LinkDestination | undefined; postId?: string | null | undefined;
     }) {
+      const destination = input.destination ?? 'app_store';
+      if (destination === 'app_store' && !input.appStoreId) throw new ApiError(400, 'INVALID_REQUEST', 'An App Store link needs the app’s App Store id');
+      if (destination === 'beta') {
+        const [beta] = await sql`select 1 from beta_apps where app = ${input.app} and launched_at is null`;
+        if (!beta) throw new ApiError(400, 'INVALID_REQUEST', `${input.app} has no beta page`);
+        // A beta link always has a short form: it's how a post's taps and sign-ups are counted.
+        if (input.slug === null) throw new ApiError(400, 'INVALID_REQUEST', 'A beta link needs a short link');
+      }
       const ct = (input.ct ?? slugify(input.name).slice(0, 40)) || 'link';
       if (!/^[A-Za-z0-9._-]{1,40}$/.test(ct)) throw new ApiError(400, 'INVALID_REQUEST', 'A campaign token is up to 40 letters, digits, . _ or -');
       const slug = input.slug === undefined ? `${input.app}-${slugify(input.name)}`.slice(0, 60) : input.slug;
@@ -104,8 +140,9 @@ export function createLinkService(sql: Sql, options: { providerId?: string | und
       }
       try {
         const [row] = await sql`
-          insert into campaign_links (team_id, app, name, ct, app_store_id, slug, affiliate_id, created_by)
-          values (${team}, ${input.app}, ${input.name}, ${ct}, ${input.appStoreId}, ${slug}, ${input.affiliateId ?? null}, ${by})
+          insert into campaign_links (team_id, app, name, ct, app_store_id, slug, affiliate_id, created_by, destination, post_id)
+          values (${team}, ${input.app}, ${input.name}, ${ct}, ${destination === 'beta' ? null : input.appStoreId!}, ${slug},
+            ${input.affiliateId ?? null}, ${by}, ${destination}, ${input.postId ?? null})
           returning id`;
         return one(team, String(row!.id));
       } catch (error) {
@@ -184,7 +221,7 @@ export function createLinkService(sql: Sql, options: { providerId?: string | und
 
     /** GET /go/<slug>: where to send the tap, counting it unless it's a crawler. */
     async follow(slug: string, userAgent: string | undefined) {
-      const [row] = await sql`select id, app_store_id, ct from campaign_links where slug = ${slug} and deleted_at is null`;
+      const [row] = await sql`select id, app, destination, app_store_id, ct, slug from campaign_links where slug = ${slug} and deleted_at is null`;
       if (!row) return undefined;
       if (!isBot(userAgent)) {
         const day = new Date(now()).toISOString().slice(0, 10);
@@ -192,7 +229,7 @@ export function createLinkService(sql: Sql, options: { providerId?: string | und
           insert into link_taps_daily (link_id, day, taps) values (${row.id}, ${day}, 1)
           on conflict (link_id, day) do update set taps = link_taps_daily.taps + 1`;
       }
-      return appStoreUrl(String(row.app_store_id), String(row.ct), options.providerId);
+      return target(row);
     },
 
     /** What App Store Connect imports into: an app's daily totals for a token. */
@@ -207,7 +244,7 @@ export function createLinkService(sql: Sql, options: { providerId?: string | und
 
     /** The apps (key and App Store id) that have links, for the import. */
     async storeApps(team: string) {
-      const rows = await sql`select distinct app, app_store_id from campaign_links where team_id = ${team}`;
+      const rows = await sql`select distinct app, app_store_id from campaign_links where team_id = ${team} and app_store_id is not null`;
       return rows.map((row) => ({ app: String(row.app), appStoreId: String(row.app_store_id) }));
     },
   };

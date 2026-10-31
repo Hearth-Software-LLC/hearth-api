@@ -17,9 +17,11 @@ export const STUDIO_MIGRATIONS = [
   '20261031100000_learning_module_listing_after_deploy.sql',
   '20261031110000_learning_module_v2.sql',
   '20261031120000_collections_app_types.sql',
+  '20261031130000_beta_funnel.sql',
 ];
 
 export const STUDIO_TABLES = [
+  'waitlist_broadcasts', 'testflight_taps_daily', 'waitlist', 'beta_apps',
   'content_collection_reports', 'content_ratings', 'content_authors',
   'content_audit_log', 'content_catalogs', 'content_releases', 'content_media', 'content_comments', 'content_reviews',
   'content_versions', 'content_entries', 'content_types', 'studio_invite_attempts',
@@ -58,9 +60,10 @@ export async function migrate(sql: postgres.Sql): Promise<() => Promise<void>> {
 /** The content types the content migration starts with. */
 const SEEDED_TYPES = ['learning-module', 'help-article', 'whats-new', 'onboarding', 'article', 'recipe-collection'];
 
-/** Empties everything but the team row and the starting content types the migrations made. */
+/** Empties everything but the team row, the starting content types and the beta apps the migrations made. */
 export async function reset(sql: postgres.Sql) {
-  await sql.unsafe(`truncate ${STUDIO_TABLES.filter((table) => table !== 'studio_teams' && table !== 'content_types').join(', ')} cascade`);
+  await sql.unsafe(`truncate ${STUDIO_TABLES.filter((table) => !['studio_teams', 'content_types', 'beta_apps'].includes(table)).join(', ')} cascade`);
+  await sql`update beta_apps set whats_new = '[]'::jsonb, resend_segment_id = null, launched_at = null, updated_by = null, updated_at = null`;
   await sql`delete from content_types where slug <> all(${SEEDED_TYPES})`;
   await sql`update studio_teams set keep_runs = 2`;
 }
