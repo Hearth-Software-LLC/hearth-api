@@ -3,6 +3,8 @@ import type { Sql } from 'postgres';
 import type { Resend } from '../email/resend.js';
 import { ApiError } from '../errors.js';
 import { isBot } from '../affiliates/links.js';
+import { CONFIRM_DAYS, confirmationEmail, launchEmail } from './emails.js';
+export { confirmationEmail, launchEmail } from './emails.js';
 
 /**
  * The beta funnel: the launch waitlist (sign up on hearthapps.com, confirm by email, hear once at
@@ -15,7 +17,6 @@ export type BetaApp = { key: string; name: string; testflightUrl: string; whatsN
 type Counts = { confirmed: number; pending: number; new: number; testflightTaps: number; pageTaps: number };
 
 const EMAIL = /^[^\s@<>()[\]\\,;:"]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/;
-const CONFIRM_DAYS = 7;
 /** A second sign-up within this window doesn't send another confirmation. */
 const RESEND_AFTER_MS = 10 * 60_000;
 
@@ -25,9 +26,7 @@ export function normalizeEmail(value: string) {
   return email;
 }
 
-const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const iso = (value: unknown) => (value == null ? null : value instanceof Date ? value.toISOString() : String(value));
-const listOf = (names: string[]) => (names.length <= 1 ? names.join('') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`);
 
 /** A signed, expiring confirmation token: base64url(JSON) "." base64url(HMAC). */
 export function signToken(key: Buffer, payload: { id: string; exp: number }) {
@@ -48,45 +47,6 @@ export function readToken(key: Buffer, token: string, now: number): { id: string
   } catch {
     return undefined;
   }
-}
-
-function frame(inner: string) {
-  return `<!doctype html><html><body style="margin:0;padding:0;background:#f5f2ec">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f2ec;padding:32px 16px">
-<tr><td align="center">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#ffffff;border-radius:18px;padding:32px;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;color:#1c1c1e">
-${inner}
-</table>
-<p style="font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;font-size:12px;color:#8a8a8e;margin:16px 0 0">Hearth Software LLC · hearthapps.com</p>
-</td></tr></table></body></html>`;
-}
-
-const button = (href: string, label: string) =>
-  `<a href="${escapeHtml(href)}" style="display:inline-block;background:#1c1c1e;color:#ffffff;text-decoration:none;font-weight:600;font-size:16px;padding:14px 26px;border-radius:999px">${escapeHtml(label)}</a>`;
-
-export function confirmationEmail(names: string[], link: string) {
-  const apps = listOf(names);
-  const subject = `Confirm: hear when ${apps} launches`;
-  const html = frame(`<tr><td>
-<h1 style="font-size:24px;line-height:1.2;margin:0 0 12px">One tap to confirm</h1>
-<p style="font-size:16px;line-height:1.5;margin:0 0 24px">You asked to hear when ${escapeHtml(apps)} comes to the App Store. Confirm, and we’ll email you once on launch day. Nothing else.</p>
-<p style="margin:0 0 24px">${button(link, 'Confirm my email')}</p>
-<p style="font-size:14px;line-height:1.5;color:#6c6c70;margin:0">The link works for ${CONFIRM_DAYS} days. If this wasn’t you, ignore this email and you won’t hear from us.</p>
-</td></tr>`);
-  const text = `You asked to hear when ${apps} comes to the App Store. Confirm, and we'll email you once on launch day. Nothing else.\n\nConfirm: ${link}\n\nThe link works for ${CONFIRM_DAYS} days. If this wasn't you, ignore this email.\n\nHearth Software LLC · hearthapps.com`;
-  return { subject, html, text };
-}
-
-export function launchEmail(name: string, appStoreUrl: string) {
-  const subject = `${name} is on the App Store`;
-  const html = frame(`<tr><td>
-<h1 style="font-size:24px;line-height:1.2;margin:0 0 12px">${escapeHtml(name)} is here</h1>
-<p style="font-size:16px;line-height:1.5;margin:0 0 24px">You asked us to tell you when ${escapeHtml(name)} launched. It’s on the App Store now.</p>
-<p style="margin:0 0 24px">${button(appStoreUrl, `Get ${name}`)}</p>
-<p style="font-size:14px;line-height:1.5;color:#6c6c70;margin:0">Thanks for waiting with us. This is the one launch email we promised for ${escapeHtml(name)}.</p>
-<p style="font-size:12px;line-height:1.5;color:#8a8a8e;margin:16px 0 0"><a href="{{{RESEND_UNSUBSCRIBE_URL}}}" style="color:#8a8a8e">Unsubscribe</a></p>
-</td></tr>`);
-  return { subject, html };
 }
 
 export type WaitlistService = ReturnType<typeof createWaitlistService>;
@@ -119,10 +79,10 @@ export function createWaitlistService(sql: Sql, options: {
     return rows.map(view);
   }
 
-  async function names(apps: string[]) {
+  async function named(apps: string[]) {
     const rows = await sql`select app, name from beta_apps where app = any(${apps})`;
     const byKey = new Map(rows.map((row) => [String(row.app), String(row.name)]));
-    return apps.map((app) => byKey.get(app) ?? app);
+    return apps.map((app) => ({ key: app, name: byKey.get(app) ?? app }));
   }
 
   /** Each app's Resend segment ("Waitlist · Sated"), made the first time it's needed. */
@@ -142,7 +102,7 @@ export function createWaitlistService(sql: Sql, options: {
   async function sendConfirmation(id: string, to: string, apps: string[]) {
     const exp = Math.floor(now() / 1000) + CONFIRM_DAYS * 86_400;
     const link = `${api}/v1/waitlist/confirm?t=${encodeURIComponent(signToken(options.tokenKey, { id, exp }))}`;
-    const message = confirmationEmail(await names(apps), link);
+    const message = confirmationEmail(await named(apps), link, site);
     await email().send({ to, ...message });
     await sql`update waitlist set confirm_sent_at = ${new Date(now())} where id = ${id}`;
   }
@@ -268,7 +228,7 @@ export function createWaitlistService(sql: Sql, options: {
         select count(*) as n from waitlist
         where ${input.app} = any(apps) and confirmed_at is not null and unsubscribed_at is null and bounced_at is null`;
       const recipients = Number(count!.n);
-      const message = launchEmail(String(beta.name), input.appStoreUrl);
+      const message = launchEmail({ key: input.app, name: String(beta.name) }, input.appStoreUrl, site);
       if (!input.send) return { ...message, recipients };
       const [already] = await sql`select 1 from waitlist_broadcasts where app = ${input.app}`;
       if (already) throw new ApiError(409, 'ALREADY_SENT', `The launch email for ${String(beta.name)} has already gone out`);
