@@ -238,19 +238,22 @@ export function registerAffiliates(app: OpenAPIHono<ApiEnvironment>, dependencie
 
   app.openapi(route('Studio links', {
     method: 'get', path: '/v1/studio/links', summary: 'Campaign links with taps and App Store numbers',
-    request: { query: z.object({ app: appKey.optional(), days }) },
+    request: { query: z.object({ app: appKey.optional(), days, destination: z.enum(['app_store', 'beta', 'all']).default('app_store') }) },
     responses: { 200: anyJson('Links'), ...errors },
   }), async (context) => {
     const query = context.req.valid('query');
-    return context.json({ links: await links().list(teamOf(context), { ...(query.app ? { app: query.app } : {}), days: query.days }) }, 200);
+    return context.json({
+      links: await links().list(teamOf(context), { ...(query.app ? { app: query.app } : {}), days: query.days, destination: query.destination }),
+    }, 200);
   });
 
   app.openapi(route('Studio links', {
-    method: 'post', path: '/v1/studio/links', summary: 'Make a campaign link (App Store link with a ct= token, and a short link)',
+    method: 'post', path: '/v1/studio/links',
+    summary: 'Make a campaign link: an App Store link with a ct= token, or (destination beta) a short link to the app’s beta page',
     request: body(z.object({
-      app: appKey, name: z.string().trim().min(1).max(80), appStoreId: z.string().regex(/^\d{5,15}$/),
+      app: appKey, name: z.string().trim().min(1).max(80), appStoreId: z.string().regex(/^\d{5,15}$/).optional(),
       ct: z.string().regex(/^[A-Za-z0-9._-]{1,40}$/).optional(), slug: z.string().regex(/^[a-z0-9-]{2,60}$/).nullable().optional(),
-      affiliateId: uuid.nullable().optional(),
+      affiliateId: uuid.nullable().optional(), destination: z.enum(['app_store', 'beta']).optional(), postId: uuid.nullable().optional(),
     }).strict()),
     responses: { 200: anyJson('Link'), ...errors },
   }), async (context) => {

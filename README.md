@@ -170,6 +170,20 @@ is written. Re-running over a draft that's in review sends it back to draft (lik
 select * from content_reports where status = 'open' order by created_at;
 ```
 
+## Beta waitlist
+
+The website's beta pages (hearthapps.com/beta/<app>) and Hearth Connect's Beta card. Tables in `20261031130000_beta_funnel.sql` (service role only); code in `src/waitlist` and `src/email/resend.ts`.
+
+- `POST /v1/waitlist` (public; JSON from the site's script, or a plain form post that answers `303` to the site's thanks page) takes an email and beta apps, and sends one confirmation email. Answers the same whether or not the address was already there. A filled `company` field (the honeypot) is ignored; 5 sign-ups an hour per network and address through Upstash.
+- `GET /v1/waitlist/confirm?t=` (the email's link, 7 days) confirms and adds the address to each app's Resend segment (`Waitlist · <App>`, made on first use), then redirects to `/beta/confirmed`.
+- `GET /v1/beta`, `GET /v1/beta/<app>` (public, cached 5 minutes): each beta app's TestFlight link and "what's new this week" lines. `PUT /v1/studio/beta/<app>` changes the lines (`post` permission).
+- `GET /go/tf/<app>?via=<slug>` counts a TestFlight button tap (crediting the post's short link when `via` is one) and redirects to TestFlight. Short links with `destination: "beta"` (`POST /v1/studio/links`) go to the app's beta page with `?via=`.
+- `GET /v1/studio/beta/summary?days=7`: confirmed, pending and new sign-ups, TestFlight taps and beta link taps per app.
+- `POST /v1/studio/waitlist/launch {app, appStoreUrl, send}`: a preview, or (owners and admins) one Resend broadcast to the app's confirmed segment. Once per app.
+- `DELETE /v1/studio/waitlist?email=` removes someone and their Resend contact. `POST /webhooks/resend` (Svix-signed) marks bounces, complaints and unsubscribes so they get no more email.
+
+Confirm tokens are signed with a key derived from `SOCIAL_TOKEN_KEY`, so there's no extra secret to set.
+
 ## BigTable kitchen purge
 
 Vercel Cron calls `GET /internal/bigtable/cron` daily at 04:17 UTC with `CRON_SECRET` (the same check as Hearken's job). It runs `bigtable_purge_moved_kitchens()` with the Supabase secret key, deleting the server copy of kitchens moved to iCloud more than 30 days ago, and answers `{"purgedKitchens": n}`. It replaces the pg_cron schedule left commented out in `20261019200000_bigtable_kitchen_moves_to_icloud.sql`; don't enable both.
@@ -242,6 +256,10 @@ Uncomment and replace the relevant settings in `.env`. Never commit it or put se
 | `REVENUECAT_SECRET_API_KEY`, `REVENUECAT_PROJECT_ID` | RevenueCat REST v2 access: subscriber sync, account deletion, and the webhook's entitlement refresh (needs read access to customers and entitlements) |
 | `ENFORCE_ENTITLEMENTS` | `true` makes Plaid (Suffice), restaurant menus (Sated) and creating/joining study groups (Hearken) answer `402 ENTITLEMENT_REQUIRED` without the app's plan or Hearth+; default `false` |
 | `EXPO_ACCESS_TOKEN` | BigTable push notifications through Expo |
+| `RESEND_API_KEY`, `RESEND_FROM` | Email through Resend for the beta waitlist (confirmations and launch emails). `RESEND_FROM` is any address on a verified Resend domain, e.g. `Hearth <hello@mail.hearthapps.com>` |
+| `RESEND_REPLY_TO` | Where replies to those emails go; default `support@hearthapps.com` |
+| `RESEND_WEBHOOK_SECRET` | Resend › Webhooks signing secret (`whsec_…`) for `/webhooks/resend` (bounces, complaints, unsubscribes) |
+| `SITE_URL` | The website, for beta pages and the waitlist's thanks and confirmed pages; default `https://hearthapps.com` |
 | `PORT` | Local server port; default 3000 |
 
 Configure all three identity settings together and both Redis settings together. With Supabase, use asymmetric JWT signing keys (ES256 or RS256); legacy HS256 secrets are deliberately unsupported. Match issuer and audience to the project's actual access-token configuration. Obtain access tokens through your identity provider's supported iOS flow.
